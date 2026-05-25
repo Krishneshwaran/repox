@@ -1,11 +1,46 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
 @import "tailwindcss";
 
 :root {
-  color: #e5e7eb;
-  background-color: #090b0f;
+  --bg: #08080c;
+  --bg-1: #0d0d12;
+  --bg-2: #141419;
+  --bg-3: #1c1c24;
+  --fg: #e8e8f0;
+  --fg-2: #b0b0be;
+  --fg-3: #72728a;
+  --fg-4: #46465a;
+  --line: #1e1e2c;
+  --line-soft: #141420;
+  --line-2: #2c2c3c;
+  --accent: oklch(0.82 0.17 142);
+  --accent-glow: oklch(0.82 0.17 142 / 0.35);
+  --accent-dim: oklch(0.82 0.17 142 / 0.4);
+  --warn: oklch(0.78 0.13 60);
 }
 
-body {
+html,
+body,
+#root {
+  height: 100%;
   margin: 0;
-  min-height: 100vh;
+  padding: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button,
+input {
+  font-family: inherit;
+}
+
+a {
+  color: inherit;
 }

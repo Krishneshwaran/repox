@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Cookie, HTTPException, Query, Response, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.auth.state_store import state_store
 from app.config import get_settings
@@ -32,6 +32,7 @@ async def github_login() -> RedirectResponse:
         secure=settings.cookie_secure,
         samesite="lax",
         max_age=600,
+        path="/",
     )
     return response
 
@@ -45,7 +46,7 @@ async def github_callback(
     settings = get_settings()
     if not oauth_state or oauth_state != state or not state_store.consume(state):
         response = RedirectResponse(url=f"{settings.frontend_url}?auth=error&reason=invalid_state")
-        response.delete_cookie("oauth_state")
+        response.delete_cookie("oauth_state", path="/")
         return response
 
     try:
@@ -57,12 +58,12 @@ async def github_callback(
         )
     except HTTPException:
         response = RedirectResponse(url=f"{settings.frontend_url}?auth=error&reason=token_exchange")
-        response.delete_cookie("oauth_state")
+        response.delete_cookie("oauth_state", path="/")
         return response
 
     session_id = token_store.create_session(token)
     response = RedirectResponse(url=f"{settings.frontend_url}?auth=success")
-    response.delete_cookie("oauth_state")
+    response.delete_cookie("oauth_state", path="/")
     response.set_cookie(
         key="repox_session",
         value=session_id,
@@ -70,5 +71,15 @@ async def github_callback(
         secure=settings.cookie_secure,
         samesite="lax",
         max_age=60 * 60 * 12,
+        path="/",
     )
+    return response
+
+
+@router.post("/logout")
+async def logout(repox_session: str | None = Cookie(default=None)) -> JSONResponse:
+    if repox_session:
+        token_store.delete_session(repox_session)
+    response = JSONResponse(content={"ok": True})
+    response.delete_cookie("repox_session", path="/")
     return response
