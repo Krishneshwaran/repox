@@ -27,3 +27,6 @@ chromadb
 
 aiofiles
 orjson
+pydantic-settings
+
+pytest

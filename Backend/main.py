@@ -1,7 +1,25 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()
+from app.api.router import api_router
+from app.config import get_settings
+
+settings = get_settings()
+
+app = FastAPI(title="repoX API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.frontend_origin],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/")
-def home():
-    return {"message": "repo X Backend Running"}
+def health_check() -> dict[str, str]:
+    return {"status": "ok", "service": "repoX backend"}
+
+
+app.include_router(api_router)
