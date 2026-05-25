@@ -2,6 +2,10 @@
 
 repoX is an AI-powered repository intelligence platform for GitHub projects.
 
+[![CI](https://github.com/Krishneshwaran/repox/actions/workflows/ci.yml/badge.svg)](https://github.com/Krishneshwaran/repox/actions/workflows/ci.yml)
+[![Security Checks](https://github.com/Krishneshwaran/repox/actions/workflows/security.yml/badge.svg)](https://github.com/Krishneshwaran/repox/actions/workflows/security.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 It scans repositories, detects architecture and technologies, generates AI analysis, and provides interactive visualization for technical understanding.
 
 ## Highlights
@@ -61,3 +65,5 @@ Set these in `Backend/.env`:
 - [Architecture](./docs/architecture.md)
 - [Setup](./docs/setup.md)
 - [Roadmap](./docs/roadmap.md)
+- [Changelog](./CHANGELOG.md)
+- [Maintainers Guide](./docs/maintainers.md)

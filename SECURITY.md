@@ -10,7 +10,7 @@ Please do not report security vulnerabilities through public GitHub issues.
 
 Report privately by email:
 
-- `maintainers@repox.dev`
+- `supportrepo@ruroxz.in`
 
 Include:
 
