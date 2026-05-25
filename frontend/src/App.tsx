@@ -3,12 +3,17 @@ import {
   analyzeArchitecture,
   analyzeReadme,
   askRepository,
+  fetchScannerStats,
+  fetchScannerHistory,
+  diffScannerSnapshots,
   fetchRepositories,
   generateInsights,
   githubLoginUrl,
   logout as apiLogout,
   runScanner,
   summarizeRepository,
+  type ScanHistoryItem,
+  type ScannerDiffResponse,
   type Repo,
   type ScanResult,
 } from './api'
@@ -735,7 +740,23 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
 type NavItem = { id: string; icon: (p: IconProps) => ReactNode; label: string; count?: number; soon?: boolean }
 type NavSection = { label: string | null; items: NavItem[] }
 
-function Sidebar({ repoCount, handle, avatar, onLogout }: { repoCount: number; handle: string; avatar: string; onLogout: () => void }) {
+function Sidebar({
+  repoCount,
+  scanCount,
+  activeNav,
+  onNavigate,
+  handle,
+  avatar,
+  onLogout,
+}: {
+  repoCount: number
+  scanCount: number
+  activeNav: string
+  onNavigate: (id: string) => void
+  handle: string
+  avatar: string
+  onLogout: () => void
+}) {
   const sections: NavSection[] = [
     {
       label: null,
@@ -749,7 +770,7 @@ function Sidebar({ repoCount, handle, avatar, onLogout }: { repoCount: number; h
       label: 'INTELLIGENCE',
       items: [
         { id: 'insights', icon: IconBrain, label: 'Insights', soon: true },
-        { id: 'scans', icon: IconShield, label: 'Scans', soon: true },
+        { id: 'scans', icon: IconShield, label: 'Scans', count: scanCount },
         { id: 'agents', icon: IconSparkle, label: 'Agents', soon: true },
       ],
     },
@@ -779,11 +800,14 @@ function Sidebar({ repoCount, handle, avatar, onLogout }: { repoCount: number; h
           <div key={si} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             {sec.label && <div style={dStyles.navSection}>{sec.label}</div>}
             {sec.items.map((it) => {
-              const isActive = it.id === 'repos'
+              const isActive = it.id === activeNav
               const NavIcon = it.icon
               return (
                 <button
                   key={it.id}
+                  onClick={() => {
+                    if (!it.soon) onNavigate(it.id)
+                  }}
                   style={{
                     ...dStyles.navItem,
                     ...(isActive ? dStyles.navItemActive : {}),
@@ -916,7 +940,7 @@ function RepoRow({ repo, onOpen, selected }: { repo: Repo; onOpen: () => void; s
 type ScanState = 'idle' | 'scanning' | 'done' | 'error'
 
 function RepoFlyout({
-  repo, onClose, scanState, scanResult, scanError, onAnalyze,
+  repo, onClose, scanState, scanResult, scanError, onAnalyze, preferredScanId,
 }: {
   repo: Repo
   onClose: () => void
@@ -924,6 +948,7 @@ function RepoFlyout({
   scanResult: ScanResult | null
   scanError: string
   onAnalyze: () => void
+  preferredScanId?: string
 }) {
   const [owner, name] = repo.full_name.split('/')
   const langColor = LANG_COLOR[repo.language ?? ''] ?? 'var(--fg-3)'
@@ -979,7 +1004,12 @@ function RepoFlyout({
       setAiLoading(true)
       setAiError('')
       try {
-        const payload = { repo_name: repo.full_name, clone_url: repo.clone_url, scan_result: scanResult }
+        const payload = {
+          repo_name: repo.full_name,
+          clone_url: repo.clone_url,
+          scan_id: preferredScanId,
+          scan_result: preferredScanId ? undefined : scanResult,
+        }
         const [s, a, r, i] = await Promise.all([
           summarizeRepository(payload),
           analyzeArchitecture(payload),
@@ -1002,7 +1032,7 @@ function RepoFlyout({
       }
     }
     void loadAI()
-  }, [scanState, scanResult, repo.full_name, repo.clone_url])
+  }, [scanState, scanResult, repo.full_name, repo.clone_url, preferredScanId])
 
   async function handleAskRepo() {
     if (!question.trim()) return
@@ -1014,7 +1044,8 @@ function RepoFlyout({
       const response = await askRepository({
         repo_name: repo.full_name,
         clone_url: repo.clone_url,
-        scan_result: scanResult ?? undefined,
+        scan_id: preferredScanId,
+        scan_result: preferredScanId ? undefined : (scanResult ?? undefined),
         question: q,
       })
       setChat((prev) => [...prev, { role: 'assistant', content: response.answer }])
@@ -1262,26 +1293,90 @@ function RepoFlyout({
 // ─── Dashboard ───────────────────────────────────────────────
 
 function Dashboard({
-  repos, handle, avatar, onLogout, onResync,
+  repos, scanCount, onScanCountChange, handle, avatar, onLogout, onResync,
 }: {
   repos: Repo[]
+  scanCount: number
+  onScanCountChange: (count: number) => void
   handle: string
   avatar: string
   onLogout: () => void
   onResync: () => void
 }) {
   const [filter, setFilter] = useState<'all' | 'public' | 'private' | 'sources'>('all')
+  const [activeNav, setActiveNav] = useState<'repos' | 'scans' | 'settings'>('repos')
+  const [storageMode, setStorageMode] = useState<'session' | 'local'>(() => {
+    const stored = localStorage.getItem('repox_storage_mode')
+    return stored === 'local' ? 'local' : 'session'
+  })
+  const [deleteOnClose, setDeleteOnClose] = useState<boolean>(() => localStorage.getItem('repox_delete_on_close') === '1')
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState<Repo | null>(null)
   const [scanState, setScanState] = useState<ScanState>('idle')
   const [scanResult, setScanResult] = useState<ScanResult | null>(null)
   const [scanError, setScanError] = useState('')
+  const [scanHistory, setScanHistory] = useState<ScanHistoryItem[]>([])
+  const [compareRepo, setCompareRepo] = useState('')
+  const [fromScanId, setFromScanId] = useState('')
+  const [toScanId, setToScanId] = useState('')
+  const [scanDiff, setScanDiff] = useState<ScannerDiffResponse | null>(null)
+  const [aiSnapshotByRepo, setAiSnapshotByRepo] = useState<Record<string, string>>({})
+  const [scanRunByRepo, setScanRunByRepo] = useState<Record<string, 'idle' | 'running' | 'done' | 'error'>>({})
 
   useEffect(() => {
     setScanState('idle')
     setScanResult(null)
     setScanError('')
   }, [selected?.id])
+
+  useEffect(() => {
+    localStorage.setItem('repox_storage_mode', storageMode)
+  }, [storageMode])
+
+  useEffect(() => {
+    if (!scanHistory.length) {
+      setCompareRepo('')
+      setFromScanId('')
+      setToScanId('')
+      setScanDiff(null)
+      return
+    }
+    if (!compareRepo) {
+      const repo = scanHistory[0].repo_name
+      setCompareRepo(repo)
+      const repoScans = scanHistory.filter((s) => s.repo_name === repo)
+      setToScanId(repoScans[0]?.scan_id ?? '')
+      setFromScanId(repoScans[1]?.scan_id ?? repoScans[0]?.scan_id ?? '')
+    }
+  }, [scanHistory, compareRepo])
+
+  useEffect(() => {
+    async function loadDiff() {
+      if (!fromScanId || !toScanId || fromScanId === toScanId) {
+        setScanDiff(null)
+        return
+      }
+      try {
+        const diff = await diffScannerSnapshots(fromScanId, toScanId)
+        setScanDiff(diff)
+      } catch {
+        setScanDiff(null)
+      }
+    }
+    void loadDiff()
+  }, [fromScanId, toScanId])
+
+  useEffect(() => {
+    localStorage.setItem('repox_delete_on_close', deleteOnClose ? '1' : '0')
+  }, [deleteOnClose])
+
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      if (deleteOnClose) localStorage.removeItem('repox_scan_history')
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [deleteOnClose])
 
   const counts = {
     all: repos.length,
@@ -1301,6 +1396,31 @@ function Dashboard({
     return true
   })
 
+  useEffect(() => {
+    async function loadHistory() {
+      if (storageMode === 'local') {
+        const raw = localStorage.getItem('repox_scan_history')
+        if (!raw) {
+          setScanHistory([])
+          return
+        }
+        try {
+          setScanHistory(JSON.parse(raw) as ScanHistoryItem[])
+        } catch {
+          setScanHistory([])
+        }
+        return
+      }
+      try {
+        const history = await fetchScannerHistory(50)
+        setScanHistory(history.items)
+      } catch {
+        setScanHistory([])
+      }
+    }
+    void loadHistory()
+  }, [storageMode])
+
   async function handleAnalyze() {
     if (!selected || scanState === 'scanning') return
     setScanState('scanning')
@@ -1310,15 +1430,77 @@ function Dashboard({
       const run = await runScanner(selected.full_name, selected.clone_url)
       setScanResult(run.result)
       setScanState('done')
+      onScanCountChange(scanCount + 1)
+      if (storageMode === 'local') {
+        const nextItem: ScanHistoryItem = {
+          scan_id: run.scan_id,
+          repo_name: run.result.repo_name,
+          version: (scanHistory.filter((s) => s.repo_name === run.result.repo_name)[0]?.version ?? 0) + 1,
+          frontend_framework: run.result.frontend_framework,
+          backend_framework: run.result.backend_framework,
+          languages: run.result.languages,
+          created_at: new Date().toISOString(),
+          status: run.status,
+        }
+        const nextHistory = [nextItem, ...scanHistory].slice(0, 200)
+        setScanHistory(nextHistory)
+        localStorage.setItem('repox_scan_history', JSON.stringify(nextHistory))
+      } else {
+        const history = await fetchScannerHistory(50)
+        setScanHistory(history.items)
+      }
     } catch (err) {
       setScanError(err instanceof Error ? err.message : 'Scan failed')
       setScanState('error')
     }
   }
 
+  async function runScanFromScans(repo: Repo) {
+    if (scanRunByRepo[repo.full_name] === 'running') return
+    setScanRunByRepo((prev) => ({ ...prev, [repo.full_name]: 'running' }))
+    try {
+      const run = await runScanner(repo.full_name, repo.clone_url)
+      setScanRunByRepo((prev) => ({ ...prev, [repo.full_name]: 'done' }))
+      if (storageMode === 'local') {
+        const nextItem: ScanHistoryItem = {
+          scan_id: run.scan_id,
+          repo_name: run.result.repo_name,
+          version: (scanHistory.find((s) => s.repo_name === run.result.repo_name)?.version ?? 0) + 1,
+          frontend_framework: run.result.frontend_framework,
+          backend_framework: run.result.backend_framework,
+          languages: run.result.languages,
+          created_at: new Date().toISOString(),
+          status: run.status,
+        }
+        const nextHistory = [nextItem, ...scanHistory].slice(0, 200)
+        setScanHistory(nextHistory)
+        localStorage.setItem('repox_scan_history', JSON.stringify(nextHistory))
+      } else {
+        const history = await fetchScannerHistory(50)
+        setScanHistory(history.items)
+      }
+      onScanCountChange(scanCount + 1)
+      setTimeout(() => {
+        setScanRunByRepo((prev) => ({ ...prev, [repo.full_name]: 'idle' }))
+      }, 1200)
+    } catch {
+      setScanRunByRepo((prev) => ({ ...prev, [repo.full_name]: 'error' }))
+    }
+  }
+
   return (
     <div style={dStyles.root}>
-      <Sidebar repoCount={repos.length} handle={handle} avatar={avatar} onLogout={onLogout} />
+      <Sidebar
+        repoCount={repos.length}
+        scanCount={scanCount}
+        activeNav={activeNav}
+        onNavigate={(id) => {
+          if (id === 'repos' || id === 'scans' || id === 'settings') setActiveNav(id)
+        }}
+        handle={handle}
+        avatar={avatar}
+        onLogout={onLogout}
+      />
 
       <main style={dStyles.main}>
         <Topbar handle={handle} avatar={avatar} />
@@ -1326,9 +1508,9 @@ function Dashboard({
         <div style={dStyles.page}>
           <div style={dStyles.pageHead}>
             <div>
-              <h1 style={dStyles.pageTitle}>Repositories</h1>
+              <h1 style={dStyles.pageTitle}>{activeNav === 'repos' ? 'Repositories' : activeNav === 'scans' ? 'Scans' : 'Settings'}</h1>
               <div style={dStyles.pageSub}>
-                <span><IconDot color="var(--accent)" size={6} /> Synced just now · {repos.length} repositories</span>
+                <span><IconDot color="var(--accent)" size={6} /> {activeNav === 'repos' ? `Synced just now · ${repos.length} repositories` : activeNav === 'scans' ? `Completed scans · ${scanCount}` : 'Configure storage behavior for live usage'}</span>
               </div>
             </div>
             <div style={dStyles.pageActions}>
@@ -1363,19 +1545,196 @@ function Dashboard({
           </div>
 
           <div style={dStyles.repoList}>
-            {filtered.length === 0 ? (
-              <div style={dStyles.empty}>
-                <div style={dStyles.emptyIcon}><IconSearch size={20} /></div>
-                <div style={{ color: 'var(--fg-2)', fontSize: 14, marginTop: 14 }}>
-                  {query ? `No repositories match "${query}"` : 'No repositories found.'}
+            {activeNav === 'repos' ? (
+              filtered.length === 0 ? (
+                <div style={dStyles.empty}>
+                  <div style={dStyles.emptyIcon}><IconSearch size={20} /></div>
+                  <div style={{ color: 'var(--fg-2)', fontSize: 14, marginTop: 14 }}>
+                    {query ? `No repositories match "${query}"` : 'No repositories found.'}
+                  </div>
+                  <div style={{ color: 'var(--fg-4)', fontSize: 12, marginTop: 4 }}>
+                    {query ? 'Try a different keyword or clear the filter.' : 'Connect your GitHub account to see repositories.'}
+                  </div>
                 </div>
-                <div style={{ color: 'var(--fg-4)', fontSize: 12, marginTop: 4 }}>
-                  {query ? 'Try a different keyword or clear the filter.' : 'Connect your GitHub account to see repositories.'}
+              ) : filtered.map(r => (
+                <RepoRow key={r.id} repo={r} onOpen={() => setSelected(r)} selected={selected?.id === r.id} />
+              ))
+            ) : activeNav === 'scans' ? (
+              <div style={dStyles.empty}>
+                {scanHistory.length === 0 ? (
+                  <>
+                    <div style={dStyles.emptyIcon}><IconShield size={20} /></div>
+                    <div style={{ color: 'var(--fg-2)', fontSize: 14, marginTop: 14 }}>
+                      No scans yet
+                    </div>
+                    <div style={{ color: 'var(--fg-4)', fontSize: 12, marginTop: 4 }}>
+                      Run repository analysis to populate scan history.
+                    </div>
+                    <div style={{ width: '100%', maxWidth: 860, marginTop: 14, border: '1px solid var(--line)', borderRadius: 10, overflow: 'hidden' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '2fr 140px', gap: 8, padding: '10px 12px', borderBottom: '1px solid var(--line)', color: 'var(--fg-4)', fontSize: 11 }}>
+                        <span>Repository</span>
+                        <span>Action</span>
+                      </div>
+                      {repos.slice(0, 12).map((repo) => (
+                        <div key={repo.id} style={{ display: 'grid', gridTemplateColumns: '2fr 140px', gap: 8, padding: '10px 12px', borderTop: '1px solid var(--line-soft)', fontSize: 12.5, alignItems: 'center' }}>
+                          <span style={{ color: 'var(--fg)' }}>{repo.full_name}</span>
+                          <button
+                            style={{ ...dStyles.ghostBtn, padding: '4px 8px', height: 28 }}
+                            onClick={() => void runScanFromScans(repo)}
+                            disabled={scanRunByRepo[repo.full_name] === 'running'}
+                          >
+                            {scanRunByRepo[repo.full_name] === 'running'
+                              ? 'Running...'
+                              : scanRunByRepo[repo.full_name] === 'done'
+                                ? 'Done'
+                                : scanRunByRepo[repo.full_name] === 'error'
+                                  ? 'Retry'
+                                  : 'Run scan'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ width: '100%' }}>
+                    <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 10, marginBottom: 10, background: 'var(--bg-1)' }}>
+                      <div style={{ color: 'var(--fg-4)', fontSize: 11, marginBottom: 8, fontFamily: "'JetBrains Mono', monospace" }}>
+                        SNAPSHOT COMPARE
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 8 }}>
+                        <select
+                          value={compareRepo}
+                          onChange={async (e) => {
+                            const repo = e.target.value
+                            setCompareRepo(repo)
+                            const repoScans = scanHistory.filter((s) => s.repo_name === repo)
+                            setToScanId(repoScans[0]?.scan_id ?? '')
+                            setFromScanId(repoScans[1]?.scan_id ?? repoScans[0]?.scan_id ?? '')
+                          }}
+                          style={{ background: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px', fontSize: 12 }}
+                        >
+                          {[...new Set(scanHistory.map((s) => s.repo_name))].map((repo) => (
+                            <option key={repo} value={repo}>{repo}</option>
+                          ))}
+                        </select>
+                        <select
+                          value={fromScanId}
+                          onChange={(e) => setFromScanId(e.target.value)}
+                          style={{ background: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px', fontSize: 12 }}
+                        >
+                          {scanHistory.filter((s) => s.repo_name === compareRepo).map((s) => (
+                            <option key={s.scan_id} value={s.scan_id}>from v{s.version}</option>
+                          ))}
+                        </select>
+                        <select
+                          value={toScanId}
+                          onChange={(e) => setToScanId(e.target.value)}
+                          style={{ background: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px', fontSize: 12 }}
+                        >
+                          {scanHistory.filter((s) => s.repo_name === compareRepo).map((s) => (
+                            <option key={s.scan_id} value={s.scan_id}>to v{s.version}</option>
+                          ))}
+                        </select>
+                        <button
+                          style={dStyles.ghostBtn}
+                          onClick={() => {
+                            if (!compareRepo || !toScanId) return
+                            setAiSnapshotByRepo((prev) => ({ ...prev, [compareRepo]: toScanId }))
+                          }}
+                        >
+                          Use for AI
+                        </button>
+                      </div>
+                      {scanDiff && (
+                        <div style={{ marginTop: 8, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+                          {scanDiff.summary.map((s, i) => (
+                            <div key={i} style={{ color: 'var(--fg-3)', fontSize: 12 }}>- {s}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ color: 'var(--fg-4)', fontSize: 11, marginBottom: 10, fontFamily: "'JetBrains Mono', monospace" }}>
+                      RECENT SCAN HISTORY
+                    </div>
+                    <div style={{ border: '1px solid var(--line)', borderRadius: 10, overflow: 'hidden' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 160px', gap: 8, padding: '10px 12px', borderBottom: '1px solid var(--line)', color: 'var(--fg-4)', fontSize: 11 }}>
+                        <span>Repository</span>
+                        <span>Frontend</span>
+                        <span>Backend</span>
+                        <span>When</span>
+                        <span>Scan</span>
+                      </div>
+                      {scanHistory.map((item) => (
+                        <div key={item.scan_id} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 160px', gap: 8, padding: '10px 12px', borderTop: '1px solid var(--line-soft)', fontSize: 12.5, alignItems: 'center' }}>
+                          <span style={{ color: 'var(--fg)' }}>{item.repo_name}</span>
+                          <span style={{ color: 'var(--fg-3)' }}>{item.frontend_framework || '—'}</span>
+                          <span style={{ color: 'var(--fg-3)' }}>{item.backend_framework || '—'}</span>
+                          <span style={{ color: 'var(--fg-4)' }}>{new Date(item.created_at).toLocaleString()}</span>
+                          <button
+                            style={{ ...dStyles.ghostBtn, padding: '4px 8px', height: 28 }}
+                            onClick={() => {
+                              const repo = repos.find((r) => r.full_name === item.repo_name)
+                              if (repo) void runScanFromScans(repo)
+                            }}
+                            disabled={scanRunByRepo[item.repo_name] === 'running'}
+                          >
+                            {scanRunByRepo[item.repo_name] === 'running'
+                              ? 'Running...'
+                              : scanRunByRepo[item.repo_name] === 'done'
+                                ? 'Done'
+                                : scanRunByRepo[item.repo_name] === 'error'
+                                  ? 'Retry'
+                                  : 'Run scan'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={dStyles.empty}>
+                <div style={{ width: '100%', maxWidth: 680, display: 'grid', gap: 14 }}>
+                  <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 14, background: 'var(--bg-1)' }}>
+                    <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 10 }}>Storage mode</div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        style={{ ...dStyles.ghostBtn, borderColor: storageMode === 'session' ? 'var(--accent-dim)' : 'var(--line)' }}
+                        onClick={() => setStorageMode('session')}
+                      >
+                        Session Memory
+                      </button>
+                      <button
+                        style={{ ...dStyles.ghostBtn, borderColor: storageMode === 'local' ? 'var(--accent-dim)' : 'var(--line)' }}
+                        onClick={() => setStorageMode('local')}
+                      >
+                        Browser Local Storage
+                      </button>
+                    </div>
+                    <div style={{ color: 'var(--fg-4)', fontSize: 12, marginTop: 8 }}>
+                      Local mode keeps scan history in browser for live deployments without backend storage.
+                    </div>
+                  </div>
+
+                  <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 14, background: 'var(--bg-1)' }}>
+                    <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 10 }}>Retention</div>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                      <input type="checkbox" checked={deleteOnClose} onChange={(e) => setDeleteOnClose(e.target.checked)} />
+                      Delete local scan data when page/tab closes
+                    </label>
+                    <button
+                      style={{ ...dStyles.ghostBtn, marginTop: 10 }}
+                      onClick={() => {
+                        localStorage.removeItem('repox_scan_history')
+                        setScanHistory([])
+                      }}
+                    >
+                      Clear local scan data now
+                    </button>
+                  </div>
                 </div>
               </div>
-            ) : filtered.map(r => (
-              <RepoRow key={r.id} repo={r} onOpen={() => setSelected(r)} selected={selected?.id === r.id} />
-            ))}
+            )}
           </div>
 
           <div style={dStyles.footnote}>
@@ -1394,6 +1753,7 @@ function Dashboard({
           scanResult={scanResult}
           scanError={scanError}
           onAnalyze={handleAnalyze}
+          preferredScanId={aiSnapshotByRepo[selected.full_name]}
         />
       )}
     </div>
@@ -1407,6 +1767,7 @@ type AppView = 'login' | 'handshake' | 'dashboard'
 function App() {
   const [view, setView] = useState<AppView>('login')
   const [repos, setRepos] = useState<Repo[]>([])
+  const [scanCount, setScanCount] = useState(0)
   const [loginError, setLoginError] = useState('')
   const [handshakeDone, setHandshakeDone] = useState(false)
   const [reposReady, setReposReady] = useState(false)
@@ -1435,6 +1796,7 @@ function App() {
     }
 
     void loadRepos()
+    void loadScanStats()
   }, [])
 
   useEffect(() => {
@@ -1462,6 +1824,15 @@ function App() {
     }
   }
 
+  async function loadScanStats() {
+    try {
+      const stats = await fetchScannerStats()
+      setScanCount(stats.total_scans)
+    } catch {
+      setScanCount(0)
+    }
+  }
+
   function handleLogin() {
     window.location.href = githubLoginUrl()
   }
@@ -1470,6 +1841,7 @@ function App() {
     void apiLogout().finally(() => {
       setView('login')
       setRepos([])
+      setScanCount(0)
       setLoginError('')
       setHandshakeDone(false)
       setReposReady(false)
@@ -1484,6 +1856,8 @@ function App() {
       {view === 'dashboard' && (
         <Dashboard
           repos={repos}
+          scanCount={scanCount}
+          onScanCountChange={setScanCount}
           handle={handle}
           avatar={avatar}
           onLogout={handleLogout}

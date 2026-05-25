@@ -25,3 +25,34 @@ class ScannerRunResponse(BaseModel):
     status: str
     result: ScanResult
 
+
+class ScannerStatsResponse(BaseModel):
+    total_scans: int
+
+
+class ScanHistoryItem(BaseModel):
+    scan_id: str
+    repo_name: str
+    version: int
+    frontend_framework: str
+    backend_framework: str
+    languages: list[str]
+    created_at: str
+    status: str = "completed"
+
+
+class ScannerHistoryResponse(BaseModel):
+    items: list[ScanHistoryItem]
+
+
+class ScannerDiffRequest(BaseModel):
+    from_scan_id: str
+    to_scan_id: str
+
+
+class ScannerDiffResponse(BaseModel):
+    from_scan_id: str
+    to_scan_id: str
+    repo_name: str
+    summary: list[str]
+    changed_fields: dict[str, dict[str, object]]

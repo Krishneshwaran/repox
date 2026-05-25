@@ -1,53 +1,63 @@
-# RepoMind X
+# repoX
 
-RepoMind X is an AI-powered GitHub repository intelligence system.
+repoX is an AI-powered repository intelligence platform for GitHub projects.
 
-It helps developers understand any GitHub repository by analyzing its structure, technology stack, architecture, documentation quality, and future improvement areas.
+It scans repositories, detects architecture and technologies, generates AI analysis, and provides interactive visualization for technical understanding.
 
-## Current Status
+## Highlights
 
-Day 1 foundation completed:
-- React frontend setup
-- FastAPI backend setup
-- Project structure created
-- Environment configuration started
-
-## Planned Features
-
-- GitHub OAuth login
-- Fetch user repositories
-- Repository structure scanner
-- Tech stack detection
-- AI repository explanation
-- Architecture diagram generation
-- Security analysis
-- Ask questions about a repository
-- Autonomous issue analysis
+- GitHub OAuth authentication
+- Repository sync and selection
+- Scanner engine (languages, frameworks, dependencies, structure)
+- AI summary, architecture explanation, README analysis, insights, Ask Repo
+- Visualization engine for architecture/dependency/API flow/timeline
+- Scan history snapshots and compare
 
 ## Tech Stack
 
-### Frontend
-- React
-- Vite
-- TailwindCSS
+- Frontend: React, TypeScript, Vite
+- Backend: FastAPI, Python
+- AI: OpenRouter/OpenAI-compatible providers
+
+## Quick Start
 
 ### Backend
-- FastAPI
-- Python
-- GitHub API
 
-### Future
-- PostgreSQL
-- Redis
-- Celery
-- ChromaDB
-- LangChain
+```bash
+cd Backend
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env
+uvicorn main:app --reload --port 8000
+```
 
-## Local Development
-
-Frontend:
+### Frontend
 
 ```bash
 cd frontend
 npm install
 npm run dev
+```
+
+## Environment
+
+Set these in `Backend/.env`:
+
+- `GITHUB_CLIENT_ID`
+- `GITHUB_CLIENT_SECRET`
+- `OPENROUTER_API_KEY` (or compatible provider key)
+- `OPENROUTER_MODEL` (example: `deepseek/deepseek-chat-v3-0324`)
+
+## Community
+
+- [Code of Conduct](./CODE_OF_CONDUCT.md)
+- [Contributing](./CONTRIBUTING.md)
+- [Security Policy](./SECURITY.md)
+- [MIT License](./LICENSE)
+
+## Documentation
+
+- [Architecture](./docs/architecture.md)
+- [Setup](./docs/setup.md)
+- [Roadmap](./docs/roadmap.md)

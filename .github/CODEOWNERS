@@ -1,0 +1,15 @@
+# Default owners for all files
+* @Krishneshwaran
+
+# Backend ownership
+/Backend/ @Krishneshwaran
+
+# Frontend ownership
+/frontend/ @Krishneshwaran
+
+# Docs and community files
+/docs/ @Krishneshwaran
+/README.md @Krishneshwaran
+/CONTRIBUTING.md @Krishneshwaran
+/CODE_OF_CONDUCT.md @Krishneshwaran
+/SECURITY.md @Krishneshwaran

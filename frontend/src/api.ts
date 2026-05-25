@@ -41,6 +41,33 @@ export type ScanRunResponse = {
   result: ScanResult
 }
 
+export type ScannerStats = {
+  total_scans: number
+}
+
+export type ScanHistoryItem = {
+  scan_id: string
+  repo_name: string
+  version: number
+  frontend_framework: string
+  backend_framework: string
+  languages: string[]
+  created_at: string
+  status: string
+}
+
+export type ScannerHistoryResponse = {
+  items: ScanHistoryItem[]
+}
+
+export type ScannerDiffResponse = {
+  from_scan_id: string
+  to_scan_id: string
+  repo_name: string
+  summary: string[]
+  changed_fields: Record<string, Record<string, unknown>>
+}
+
 export type AIRequest = {
   repo_name: string
   clone_url: string | null
@@ -101,26 +128,46 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return response.json() as Promise<T>
 }
 
-export function githubLoginUrl(): string {
-  return `${API_BASE_URL}/auth/github/login`
-}
-
-export async function fetchRepositories(): Promise<Repo[]> {
-  const response = await fetch(`${API_BASE_URL}/github/repos`, {
+async function apiGet<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
     method: 'GET',
     credentials: 'include',
   })
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ detail: 'Request failed' }))
-    throw new Error((payload as { detail?: string }).detail ?? 'Failed to fetch repositories')
+    throw new Error((payload as { detail?: string }).detail ?? 'Request failed')
   }
 
-  return response.json() as Promise<Repo[]>
+  return response.json() as Promise<T>
+}
+
+export function githubLoginUrl(): string {
+  return `${API_BASE_URL}/auth/github/login`
+}
+
+export async function fetchRepositories(): Promise<Repo[]> {
+  return apiGet<Repo[]>('/github/repos')
 }
 
 export async function runScanner(repo_name: string, clone_url: string | null): Promise<ScanRunResponse> {
   return apiPost<ScanRunResponse>('/scanner/scan', { repo_name, clone_url })
+}
+
+export async function fetchScannerStats(): Promise<ScannerStats> {
+  return apiGet<ScannerStats>('/scanner/stats')
+}
+
+export async function fetchScannerHistory(limit = 50): Promise<ScannerHistoryResponse> {
+  return apiGet<ScannerHistoryResponse>(`/scanner/history?limit=${limit}`)
+}
+
+export async function fetchRepoScannerHistory(repoName: string, limit = 50): Promise<ScannerHistoryResponse> {
+  return apiGet<ScannerHistoryResponse>(`/scanner/history/${encodeURIComponent(repoName)}?limit=${limit}`)
+}
+
+export async function diffScannerSnapshots(from_scan_id: string, to_scan_id: string): Promise<ScannerDiffResponse> {
+  return apiPost<ScannerDiffResponse>('/scanner/diff', { from_scan_id, to_scan_id })
 }
 
 export async function summarizeRepository(payload: AIRequest): Promise<{ summary: string }> {
