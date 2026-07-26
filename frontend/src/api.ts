@@ -33,6 +33,12 @@ export type ScanResult = {
   structure: Record<string, boolean>
   important_files: string[]
   dependencies: string[]
+  readme_analysis: { exists?: boolean; score?: number; readability_score?: number; completeness_score?: number; sections?: Record<string, boolean>; missing_sections?: string[] }
+  quality: { source_file_count?: number; test_file_count?: number; has_tests?: boolean; build_files?: string[]; has_build_configuration?: boolean; ci_workflows?: string[] }
+  security: { status?: string; finding_count?: number; findings?: Array<{ type: string; file: string; line: number; severity: string }>; note?: string }
+  api_routes: Array<{ method: string; path: string; file: string; framework: string }>
+  commit_history: { analyzed_commits?: number; weekly_activity?: number[]; active_weeks?: number; contributors?: Array<{ name: string; commits: number }>; latest_commit_at?: string | null; latest_commit_message?: string | null; history_depth?: string }
+  data_sources: Record<string, string>
 }
 
 export type ScanRunResponse = {
@@ -73,6 +79,25 @@ export type AIRequest = {
   clone_url: string | null
   scan_id?: string
   scan_result?: ScanResult
+  user_api_key?: string
+  user_model?: string
+  user_provider?: string
+}
+
+export function getAIConfig(): { user_api_key?: string; user_model?: string; user_provider?: string } {
+  const key = localStorage.getItem('repox_ai_key') ?? ''
+  const model = localStorage.getItem('repox_ai_model') ?? ''
+  const provider = localStorage.getItem('repox_ai_provider') ?? ''
+  return {
+    ...(key ? { user_api_key: key } : {}),
+    ...(model ? { user_model: model } : {}),
+    ...(provider ? { user_provider: provider } : {}),
+  }
+}
+
+export type AskMessage = {
+  role: 'user' | 'assistant'
+  content: string
 }
 
 export type VizNode = {
@@ -171,23 +196,23 @@ export async function diffScannerSnapshots(from_scan_id: string, to_scan_id: str
 }
 
 export async function summarizeRepository(payload: AIRequest): Promise<{ summary: string }> {
-  return apiPost<{ summary: string }>('/ai/summarize', payload)
+  return apiPost<{ summary: string }>('/ai/summarize', { ...getAIConfig(), ...payload })
 }
 
 export async function analyzeArchitecture(payload: AIRequest): Promise<{ architecture: string }> {
-  return apiPost<{ architecture: string }>('/ai/architecture', payload)
+  return apiPost<{ architecture: string }>('/ai/architecture', { ...getAIConfig(), ...payload })
 }
 
 export async function analyzeReadme(payload: AIRequest): Promise<{ analysis: string; scores: { readme_score: number; readability_score: number; completeness_score: number } }> {
-  return apiPost<{ analysis: string; scores: { readme_score: number; readability_score: number; completeness_score: number } }>('/ai/readme-analysis', payload)
+  return apiPost<{ analysis: string; scores: { readme_score: number; readability_score: number; completeness_score: number } }>('/ai/readme-analysis', { ...getAIConfig(), ...payload })
 }
 
 export async function generateInsights(payload: AIRequest): Promise<{ insights: string }> {
-  return apiPost<{ insights: string }>('/ai/insights', payload)
+  return apiPost<{ insights: string }>('/ai/insights', { ...getAIConfig(), ...payload })
 }
 
-export async function askRepository(payload: AIRequest & { question: string }): Promise<{ answer: string }> {
-  return apiPost<{ answer: string }>('/ai/ask', payload)
+export async function askRepository(payload: AIRequest & { question: string; history?: AskMessage[] }): Promise<{ answer: string }> {
+  return apiPost<{ answer: string }>('/ai/ask', { ...getAIConfig(), ...payload })
 }
 
 export async function fetchVisualizationArchitecture(payload: AIRequest): Promise<VizGraphResponse> {
@@ -208,6 +233,16 @@ export async function fetchVisualizationRepositoryMap(payload: AIRequest): Promi
 
 export async function fetchVisualizationTimeline(payload: AIRequest): Promise<TimelineResponse> {
   return apiPost<TimelineResponse>('/visualization/timeline', payload)
+}
+
+export async function fetchRepoLanguages(fullName: string): Promise<Record<string, number>> {
+  const [owner, repo] = fullName.split('/')
+  return apiGet<Record<string, number>>(`/github/repos/${owner}/${repo}/languages`)
+}
+
+export async function fetchRepoActivity(fullName: string): Promise<number[]> {
+  const [owner, repo] = fullName.split('/')
+  return apiGet<number[]>(`/github/repos/${owner}/${repo}/activity`)
 }
 
 export async function logout(): Promise<void> {

@@ -56,19 +56,29 @@ def insights_prompt(context: str) -> list[dict[str, str]]:
     ]
 
 
-def ask_prompt(context: str, question: str, memory_notes: str = "") -> list[dict[str, str]]:
+def ask_prompt(
+    context: str,
+    question: str,
+    memory_notes: str = "",
+    history: str = "",
+) -> list[dict[str, str]]:
     memory_block = f"\n\nRepository memory notes:\n{memory_notes}" if memory_notes else ""
+    history_block = f"\n\nConversation history:\n{history}" if history else ""
     return [
         {
             "role": "system",
             "content": (
-                "You answer repository questions with technical precision. If evidence is missing, explicitly say unknown "
-                "and list what files or signals would confirm it."
+                "You answer repository questions with technical precision in plain English. "
+                "Respond in 1 to 3 short sentences. "
+                "Do not use markdown, headings, bullets, numbered lists, code fences, or preambles. "
+                "Do not start with phrases like 'Inferred purpose'. "
+                "Answer directly and only describe what is supported by the repository context. "
+                "If evidence is missing, explicitly say unknown and mention what files or signals would confirm it."
             ),
         },
         {
             "role": "user",
-            "content": f"Repository context:\n{context}{memory_block}\n\nQuestion: {question}",
+            "content": f"Repository context:\n{context}{memory_block}{history_block}\n\nQuestion: {question}",
         },
     ]
 

@@ -10,6 +10,9 @@ class AIBaseRequest(BaseModel):
     clone_url: str | None = None
     scan_id: str | None = None
     scan_result: ScanResult | None = None
+    user_api_key: str | None = None
+    user_model: str | None = None
+    user_provider: str | None = None
 
 
 class SummarizeResponse(BaseModel):

@@ -9,6 +9,7 @@ from fastapi import HTTPException, status
 from app.models.scanner import ScanHistoryItem, ScanResult, ScannerDiffResponse
 from app.scanner.config_detector import detect_documentation, detect_important_files, detect_infrastructure
 from app.scanner.dependency_detector import detect_dependencies, detect_package_managers
+from app.scanner.deep_analyzer import analyze_commits, analyze_quality, analyze_readme, analyze_security, extract_api_routes, scan_data_sources
 from app.scanner.file_tree import list_files
 from app.scanner.repo_cloner import RepoCloner
 from app.scanner.structure_detector import detect_structure
@@ -109,6 +110,12 @@ class ScannerService:
                 structure=detect_structure(repo_dir),
                 important_files=detect_important_files(repo_dir),
                 dependencies=dependencies[:120],
+                readme_analysis=analyze_readme(repo_dir),
+                quality=analyze_quality(repo_dir),
+                security=analyze_security(repo_dir),
+                api_routes=extract_api_routes(repo_dir),
+                commit_history=analyze_commits(repo_dir),
+                data_sources=scan_data_sources(),
             )
             scan_id = self.store.save(result)
             return scan_id, result

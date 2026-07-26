@@ -62,16 +62,45 @@ class GitHubService:
             scope=data.get("scope"),
         )
 
-    async def fetch_repositories(self, access_token: str) -> list[Repository]:
-        headers = {
+    def _gh_headers(self, access_token: str) -> dict[str, str]:
+        return {
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
+
+    async def fetch_repo_languages(self, access_token: str, owner: str, repo: str) -> dict[str, int]:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/languages",
+                headers=self._gh_headers(access_token),
+            )
+        if response.status_code == 401:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="GitHub session expired.")
+        if response.status_code >= 400:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Unable to fetch language data.")
+        return response.json()
+
+    async def fetch_commit_activity(self, access_token: str, owner: str, repo: str) -> list[int]:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/stats/commit_activity",
+                headers=self._gh_headers(access_token),
+            )
+        if response.status_code in (202, 204):
+            return []
+        if response.status_code == 401:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="GitHub session expired.")
+        if response.status_code >= 400:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Unable to fetch commit activity.")
+        weeks: list[dict[str, Any]] = response.json()
+        return [w.get("total", 0) for w in weeks[-16:]]
+
+    async def fetch_repositories(self, access_token: str) -> list[Repository]:
         params = {"sort": "updated", "per_page": 100}
 
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(self.USER_REPOS_URL, headers=headers, params=params)
+            response = await client.get(self.USER_REPOS_URL, headers=self._gh_headers(access_token), params=params)
 
         if response.status_code == 401:
             raise HTTPException(

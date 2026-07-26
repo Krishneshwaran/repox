@@ -7,11 +7,14 @@ import {
   fetchScannerHistory,
   diffScannerSnapshots,
   fetchRepositories,
+  fetchRepoLanguages,
+  fetchRepoActivity,
   generateInsights,
   githubLoginUrl,
   logout as apiLogout,
   runScanner,
   summarizeRepository,
+  type AskMessage,
   type ScanHistoryItem,
   type ScannerDiffResponse,
   type Repo,
@@ -75,6 +78,25 @@ function MarkdownBlock({ text }: { text: string }) {
       })}
     </div>
   )
+}
+
+function cleanAskText(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim()
+      if (!trimmed) return ''
+      return trimmed
+        .replace(/^#{1,6}\s+/, '')
+        .replace(/^[-*•]\s+/, '')
+        .replace(/^\d+[.)]\s+/, '')
+        .replace(/\*\*(.*?)\*\*/g, '$1')
+        .replace(/__(.*?)__/g, '$1')
+        .replace(/`([^`]*)`/g, '$1')
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 // ─── Icons ───────────────────────────────────────────────────
@@ -208,6 +230,53 @@ const loginStyles: Record<string, CSSProperties> = {
     color: 'var(--fg-4)', fontSize: 12, fontFamily: "'JetBrains Mono', monospace",
   },
   trustItem: { display: 'inline-flex', alignItems: 'center', gap: 8 },
+  searchSection: {
+    marginTop: 48, width: '100%', maxWidth: 560,
+    display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 0,
+  },
+  searchDivider: {
+    display: 'flex', alignItems: 'center', gap: 14,
+    marginBottom: 18,
+  },
+  searchDividerLine: { flex: 1, height: 1, background: 'var(--line-soft)', display: 'block' },
+  searchDividerLabel: { fontSize: 11, color: 'var(--fg-4)', fontFamily: "'JetBrains Mono', monospace", letterSpacing: '0.08em', whiteSpace: 'nowrap' },
+  searchBar: {
+    display: 'flex', alignItems: 'center', gap: 10,
+    padding: '10px 14px',
+    background: 'var(--bg-1)',
+    border: '1px solid var(--line)',
+    borderRadius: 8,
+  },
+  searchInput: {
+    flex: 1, background: 'transparent', border: 'none', outline: 'none',
+    color: 'var(--fg)', fontSize: 13, fontFamily: 'inherit',
+  },
+  searchSpinner: {
+    width: 12, height: 12, borderRadius: 999,
+    border: '1.5px solid var(--line-2)', borderTopColor: 'var(--accent)',
+    animation: 'hsSpin 0.8s linear infinite', display: 'inline-block', flexShrink: 0,
+  },
+  searchResults: {
+    marginTop: 10, display: 'flex', flexDirection: 'column',
+    border: '1px solid var(--line-soft)', borderRadius: 8, overflow: 'hidden',
+    background: 'var(--bg-1)',
+  },
+  searchResult: {
+    display: 'block', padding: '12px 16px',
+    borderBottom: '1px solid var(--line-soft)',
+    textDecoration: 'none', color: 'inherit',
+    transition: 'background .1s ease',
+  },
+  searchResultTop: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  searchResultName: { fontSize: 13, fontFamily: "'JetBrains Mono', monospace" },
+  searchResultMeta: { display: 'flex', gap: 12, alignItems: 'center', color: 'var(--fg-4)', fontSize: 11, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 },
+  searchMetaItem: { display: 'inline-flex', alignItems: 'center', gap: 5 },
+  searchResultDesc: { color: 'var(--fg-3)', fontSize: 12, marginTop: 4, lineHeight: 1.4 },
+  searchTopic: {
+    fontSize: 10, fontFamily: "'JetBrains Mono', monospace",
+    color: 'var(--fg-4)', background: 'var(--bg-2)',
+    padding: '1px 6px', borderRadius: 3,
+  },
   footer: {
     position: 'relative', zIndex: 2,
     padding: '18px 32px', borderTop: '1px solid var(--line-soft)',
@@ -221,14 +290,56 @@ const loginStyles: Record<string, CSSProperties> = {
 
 // ─── Login Screen ────────────────────────────────────────────
 
+type GHSearchRepo = {
+  id: number
+  full_name: string
+  description: string | null
+  language: string | null
+  stargazers_count: number
+  forks_count: number
+  html_url: string
+  private: boolean
+  topics: string[]
+}
+
+async function searchPublicRepos(q: string): Promise<GHSearchRepo[]> {
+  if (!q.trim()) return []
+  const res = await fetch(
+    `https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&order=desc&per_page=8`,
+    { headers: { Accept: 'application/vnd.github+json' } },
+  )
+  if (!res.ok) throw new Error(`GitHub search failed: ${res.status}`)
+  const data = await res.json() as { items: GHSearchRepo[] }
+  return data.items
+}
+
 function LoginScreen({ onLogin, error }: { onLogin: () => void; error?: string }) {
   const [pressed, setPressed] = useState(false)
   const [hovered, setHovered] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<GHSearchRepo[]>([])
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [searchError, setSearchError] = useState('')
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handle = () => {
     if (pressed) return
     setPressed(true)
     setTimeout(() => onLogin(), 350)
+  }
+
+  const handleSearchInput = (val: string) => {
+    setSearchQuery(val)
+    setSearchError('')
+    if (searchTimer.current) clearTimeout(searchTimer.current)
+    if (!val.trim()) { setSearchResults([]); return }
+    searchTimer.current = setTimeout(() => {
+      setSearchLoading(true)
+      searchPublicRepos(val)
+        .then(setSearchResults)
+        .catch((e: unknown) => setSearchError(e instanceof Error ? e.message : 'Search failed'))
+        .finally(() => setSearchLoading(false))
+    }, 420)
   }
 
   return (
@@ -239,7 +350,7 @@ function LoginScreen({ onLogin, error }: { onLogin: () => void; error?: string }
       <div style={loginStyles.topbar}>
         <RepoXMark size={20} />
         <div style={loginStyles.topbarRight}>
-          <a style={loginStyles.topLink} href="#">Docs</a>
+          <a style={loginStyles.topLink} href="http://localhost:8000/docs" target="_blank" rel="noreferrer">Docs</a>
           <a style={loginStyles.topLink} href="#">Changelog</a>
           <a style={loginStyles.topLink} href="#">
             Status
@@ -248,7 +359,7 @@ function LoginScreen({ onLogin, error }: { onLogin: () => void; error?: string }
         </div>
       </div>
 
-      <div style={loginStyles.center}>
+      <div style={{ ...loginStyles.center, overflowY: 'auto', paddingTop: 40, paddingBottom: 40 }}>
         <div style={loginStyles.eyebrowRow}>
           <span style={loginStyles.eyebrowDot} />
           <span style={loginStyles.eyebrow}>PHASE 1 · PUBLIC PREVIEW</span>
@@ -280,15 +391,89 @@ function LoginScreen({ onLogin, error }: { onLogin: () => void; error?: string }
             <span>Continue with GitHub</span>
             <span style={loginStyles.ctaKbd}><IconArrowUpRight size={14} /></span>
           </button>
-          <button style={loginStyles.secondary}>
+          <a
+            href="http://localhost:8000/docs"
+            target="_blank"
+            rel="noreferrer"
+            style={{ ...loginStyles.secondary, textDecoration: 'none' }}
+          >
             <IconBook size={14} /> <span>Read the docs</span>
-          </button>
+          </a>
         </div>
 
         <div style={loginStyles.trust}>
           <div style={loginStyles.trustItem}><IconShield size={14} /> <span>Read-only scopes</span></div>
           <div style={loginStyles.trustItem}><IconLock size={14} /> <span>Tokens never persisted to disk</span></div>
           <div style={loginStyles.trustItem}><IconCheck size={14} /> <span>Revoke anytime in GitHub settings</span></div>
+        </div>
+
+        {/* Public repo search */}
+        <div style={loginStyles.searchSection}>
+          <div style={loginStyles.searchDivider}>
+            <span style={loginStyles.searchDividerLine} />
+            <span style={loginStyles.searchDividerLabel}>or explore public repositories</span>
+            <span style={loginStyles.searchDividerLine} />
+          </div>
+          <div style={loginStyles.searchBar}>
+            <IconSearch size={14} style={{ color: 'var(--fg-4)', flexShrink: 0 }} />
+            <input
+              value={searchQuery}
+              onChange={(e) => handleSearchInput(e.target.value)}
+              placeholder="Search all GitHub public repos…"
+              style={loginStyles.searchInput}
+            />
+            {searchLoading && <span style={loginStyles.searchSpinner} />}
+          </div>
+
+          {searchError && (
+            <p style={{ color: 'var(--warn)', fontSize: 12, marginTop: 8, fontFamily: "'JetBrains Mono', monospace" }}>
+              {searchError}
+            </p>
+          )}
+
+          {searchResults.length > 0 && (
+            <div style={loginStyles.searchResults}>
+              {searchResults.map((repo) => {
+                const langColor = LANG_COLOR[repo.language ?? ''] ?? 'var(--fg-4)'
+                return (
+                  <a
+                    key={repo.id}
+                    href={repo.html_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={loginStyles.searchResult}
+                  >
+                    <div style={loginStyles.searchResultTop}>
+                      <span style={loginStyles.searchResultName}>
+                        <span style={{ color: 'var(--fg-3)' }}>{repo.full_name.split('/')[0]}/</span>
+                        <span style={{ color: 'var(--fg)', fontWeight: 500 }}>{repo.full_name.split('/')[1]}</span>
+                      </span>
+                      <div style={loginStyles.searchResultMeta}>
+                        {repo.language && (
+                          <span style={loginStyles.searchMetaItem}>
+                            <span style={{ width: 7, height: 7, borderRadius: 7, background: langColor, display: 'inline-block' }} />
+                            {repo.language}
+                          </span>
+                        )}
+                        <span style={loginStyles.searchMetaItem}><IconStar size={11} /> {repo.stargazers_count.toLocaleString()}</span>
+                        <span style={loginStyles.searchMetaItem}><IconFork size={11} /> {repo.forks_count.toLocaleString()}</span>
+                      </div>
+                    </div>
+                    {repo.description && (
+                      <div style={loginStyles.searchResultDesc}>{repo.description}</div>
+                    )}
+                    {repo.topics.slice(0, 3).length > 0 && (
+                      <div style={{ display: 'flex', gap: 5, marginTop: 6, flexWrap: 'wrap' }}>
+                        {repo.topics.slice(0, 3).map(t => (
+                          <span key={t} style={loginStyles.searchTopic}>{t}</span>
+                        ))}
+                      </div>
+                    )}
+                  </a>
+                )
+              })}
+            </div>
+          )}
         </div>
       </div>
 
@@ -300,6 +485,8 @@ function LoginScreen({ onLogin, error }: { onLogin: () => void; error?: string }
         <a style={loginStyles.footLink} href="#">Privacy</a>
         <a style={loginStyles.footLink} href="#">Terms</a>
       </div>
+
+      <style>{`@keyframes hsSpin { to { transform: rotate(360deg); } }`}</style>
     </div>
   )
 }
@@ -467,7 +654,24 @@ const dStyles: Record<string, CSSProperties> = {
   sidebar: {
     width: 248, flexShrink: 0,
     borderRight: '1px solid var(--line-soft)', background: 'var(--bg)',
-    display: 'flex', flexDirection: 'column', padding: '18px 12px 14px', overflow: 'hidden',
+    display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden',
+    boxShadow: '8px 0 28px rgba(0,0,0,0.16)',
+  },
+  macTitlebar: {
+    height: 42, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 7,
+    padding: '0 14px', background: '#f5f5f7', borderBottom: '1px solid #dedee3',
+  },
+  macControl: {
+    width: 12, height: 12, borderRadius: 999, display: 'inline-block',
+    boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.13)',
+  },
+  macTitle: {
+    flex: 1, textAlign: 'center', paddingRight: 38, color: '#5e5e67',
+    fontSize: 11, fontWeight: 600, letterSpacing: '0.01em',
+  },
+  sidebarContent: {
+    display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0,
+    padding: '18px 12px 14px',
   },
   brand: {
     display: 'flex', flexDirection: 'column', gap: 14,
@@ -678,6 +882,19 @@ const dStyles: Record<string, CSSProperties> = {
   legendDot: { display: 'inline-block', width: 8, height: 8, borderRadius: 8, marginRight: 6, transform: 'translateY(1px)' },
   actChart: { display: 'flex', gap: 4, height: 80, alignItems: 'flex-end' },
   actBar: { flex: 1, borderRadius: 2 },
+  flyoutTabBar: {
+    display: 'flex', gap: 2, padding: '10px 18px 0', borderBottom: '1px solid var(--line)',
+    flexShrink: 0, overflowX: 'auto', scrollbarWidth: 'none' as const,
+  },
+  flyoutTab: {
+    padding: '7px 12px', fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+    letterSpacing: '0.1em', color: 'var(--fg-4)', background: 'transparent',
+    border: 'none', borderBottom: '2px solid transparent', cursor: 'pointer',
+    marginBottom: -1, whiteSpace: 'nowrap' as const, transition: 'color .15s',
+  },
+  flyoutTabActive: {
+    color: 'var(--accent)', borderBottomColor: 'var(--accent)',
+  },
   readout: { border: '1px solid var(--line-soft)', borderRadius: 8, background: 'var(--bg-1)', overflow: 'hidden' },
   readoutRow: {
     display: 'flex', justifyContent: 'space-between', padding: '10px 14px',
@@ -786,7 +1003,14 @@ function Sidebar({
 
   return (
     <aside style={dStyles.sidebar}>
-      <div style={dStyles.brand}>
+      <div style={dStyles.macTitlebar} aria-label="Application window controls">
+        <span style={{ ...dStyles.macControl, background: '#ff5f57' }} />
+        <span style={{ ...dStyles.macControl, background: '#febc2e' }} />
+        <span style={{ ...dStyles.macControl, background: '#28c840' }} />
+        <span style={dStyles.macTitle}>repoX</span>
+      </div>
+      <div style={dStyles.sidebarContent}>
+        <div style={dStyles.brand}>
         <RepoXMark size={20} />
         <button style={dStyles.workspaceSel}>
           <span style={dStyles.avatar}>{avatar}</span>
@@ -846,6 +1070,7 @@ function Sidebar({
         <button style={dStyles.logoutBtn} onClick={onLogout}>
           <IconLogout size={14} /> <span>Sign out</span>
         </button>
+      </div>
       </div>
     </aside>
   )
@@ -938,6 +1163,21 @@ function RepoRow({ repo, onOpen, selected }: { repo: Repo; onOpen: () => void; s
 // ─── Repo Flyout ─────────────────────────────────────────────
 
 type ScanState = 'idle' | 'scanning' | 'done' | 'error'
+type ScanStage = 'cloning' | 'indexing' | 'detecting' | 'analyzing'
+type FlyoutTab = 'overview' | 'scan' | 'summary' | 'architecture' | 'readme' | 'insights' | 'ask' | 'viz'
+type AITabState = { status: 'idle' | 'loading' | 'done' | 'error'; result: string; error: string }
+const AI_INIT: AITabState = { status: 'idle', result: '', error: '' }
+
+const TABS: { id: FlyoutTab; label: string }[] = [
+  { id: 'overview', label: 'OVERVIEW' },
+  { id: 'scan', label: 'SCAN' },
+  { id: 'summary', label: 'SUMMARY' },
+  { id: 'architecture', label: 'ARCH' },
+  { id: 'readme', label: 'README' },
+  { id: 'insights', label: 'INSIGHTS' },
+  { id: 'ask', label: 'ASK' },
+  { id: 'viz', label: 'VISUALIZE' },
+]
 
 function RepoFlyout({
   repo, onClose, scanState, scanResult, scanError, onAnalyze, preferredScanId,
@@ -951,142 +1191,174 @@ function RepoFlyout({
   preferredScanId?: string
 }) {
   const [owner, name] = repo.full_name.split('/')
-  const langColor = LANG_COLOR[repo.language ?? ''] ?? 'var(--fg-3)'
-  const activity = pseudoActivity(repo.id)
-  const [summary, setSummary] = useState('')
-  const [architecture, setArchitecture] = useState('')
-  const [readmeAnalysis, setReadmeAnalysis] = useState('')
-  const [readmeScores, setReadmeScores] = useState<{ readme: number; readability: number; completeness: number } | null>(null)
-  const [insights, setInsights] = useState('')
-  const [aiLoading, setAiLoading] = useState(false)
-  const [aiError, setAiError] = useState('')
+  const [activeTab, setActiveTab] = useState<FlyoutTab>('overview')
+  const [languages, setLanguages] = useState<Record<string, number>>({})
+  const [activity, setActivity] = useState<number[]>(pseudoActivity(repo.id))
+  const [scanStage, setScanStage] = useState<ScanStage>('cloning')
+  // Per-tab AI state
+  const [summaryTab, setSummaryTab] = useState<AITabState>(AI_INIT)
+  const [archTab, setArchTab] = useState<AITabState>(AI_INIT)
+  const [readmeTab, setReadmeTab] = useState<AITabState & { scores: { readme: number; readability: number; completeness: number } | null }>({ ...AI_INIT, scores: null })
+  const [insightsTab, setInsightsTab] = useState<AITabState>(AI_INIT)
   const [question, setQuestion] = useState('')
   const [askLoading, setAskLoading] = useState(false)
   const [chat, setChat] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([])
 
-  const readoutEntries = scanResult ? [
-    { key: 'Frontend', val: scanResult.frontend_framework || '—' },
-    { key: 'Backend', val: scanResult.backend_framework || '—' },
-    { key: 'Languages', val: scanResult.languages.join(', ') || '—' },
-    { key: 'Pkg managers', val: scanResult.package_managers.join(', ') || '—' },
-    { key: 'Docker', val: scanResult.docker ? 'Yes' : 'No' },
-    { key: 'GitHub Actions', val: scanResult.github_actions ? 'Yes' : 'No' },
-    { key: 'README', val: scanResult.documentation.readme ? 'Present' : 'Missing' },
-    {
-      key: 'Structure',
-      val: Object.entries(scanResult.structure).filter(([, v]) => v).map(([k]) => k).join(', ') || '—',
-    },
-  ] : []
-
-  const hintMap: Record<ScanState, string> = {
-    idle: 'Click "Run analysis" to scan',
-    scanning: 'Scanning…',
-    done: 'Scan complete',
-    error: scanError,
+  const aiPayload = {
+    repo_name: repo.full_name,
+    clone_url: repo.clone_url,
+    scan_id: preferredScanId,
+    scan_result: preferredScanId ? undefined : (scanResult ?? undefined),
   }
 
+  // Reset everything when repo changes
   useEffect(() => {
-    setSummary('')
-    setArchitecture('')
-    setReadmeAnalysis('')
-    setReadmeScores(null)
-    setInsights('')
-    setAiLoading(false)
-    setAiError('')
+    setActiveTab('overview')
+    setLanguages({})
+    setActivity(pseudoActivity(repo.id))
+    setSummaryTab(AI_INIT)
+    setArchTab(AI_INIT)
+    setReadmeTab({ ...AI_INIT, scores: null })
+    setInsightsTab(AI_INIT)
     setQuestion('')
     setAskLoading(false)
     setChat([])
-  }, [repo.id])
+    void fetchRepoLanguages(repo.full_name).then(setLanguages).catch(() => undefined)
+    void fetchRepoActivity(repo.full_name).then((d) => { if (d.length > 0) setActivity(d) }).catch(() => undefined)
+  }, [repo.id, repo.full_name])
 
   useEffect(() => {
-    async function loadAI() {
-      if (scanState !== 'done' || !scanResult) return
-      setAiLoading(true)
-      setAiError('')
-      try {
-        const payload = {
-          repo_name: repo.full_name,
-          clone_url: repo.clone_url,
-          scan_id: preferredScanId,
-          scan_result: preferredScanId ? undefined : scanResult,
-        }
-        const [s, a, r, i] = await Promise.all([
-          summarizeRepository(payload),
-          analyzeArchitecture(payload),
-          analyzeReadme(payload),
-          generateInsights(payload),
-        ])
-        setSummary(s.summary)
-        setArchitecture(a.architecture)
-        setReadmeAnalysis(r.analysis)
-        setReadmeScores({
-          readme: r.scores.readme_score,
-          readability: r.scores.readability_score,
-          completeness: r.scores.completeness_score,
-        })
-        setInsights(i.insights)
-      } catch (err) {
-        setAiError(err instanceof Error ? err.message : 'AI analysis failed')
-      } finally {
-        setAiLoading(false)
-      }
+    if (scanState !== 'scanning') {
+      setScanStage('cloning')
+      return
     }
-    void loadAI()
-  }, [scanState, scanResult, repo.full_name, repo.clone_url, preferredScanId])
+    const stages: ScanStage[] = ['cloning', 'indexing', 'detecting', 'analyzing']
+    let index = 0
+    const timer = window.setInterval(() => {
+      index = Math.min(index + 1, stages.length - 1)
+      setScanStage(stages[index])
+    }, 1400)
+    return () => window.clearInterval(timer)
+  }, [scanState])
 
-  async function handleAskRepo() {
+  useEffect(() => {
+    const scannedActivity = scanResult?.commit_history?.weekly_activity
+    if (scannedActivity?.length) setActivity(scannedActivity)
+  }, [scanResult])
+
+  async function runSummary() {
+    setSummaryTab({ status: 'loading', result: '', error: '' })
+    try {
+      const r = await summarizeRepository(aiPayload)
+      setSummaryTab({ status: 'done', result: r.summary, error: '' })
+    } catch (e) { setSummaryTab({ status: 'error', result: '', error: e instanceof Error ? e.message : 'Failed' }) }
+  }
+
+  async function runArch() {
+    setArchTab({ status: 'loading', result: '', error: '' })
+    try {
+      const r = await analyzeArchitecture(aiPayload)
+      setArchTab({ status: 'done', result: r.architecture, error: '' })
+    } catch (e) { setArchTab({ status: 'error', result: '', error: e instanceof Error ? e.message : 'Failed' }) }
+  }
+
+  async function runReadme() {
+    setReadmeTab({ status: 'loading', result: '', error: '', scores: null })
+    try {
+      const r = await analyzeReadme(aiPayload)
+      setReadmeTab({ status: 'done', result: r.analysis, error: '', scores: { readme: r.scores.readme_score, readability: r.scores.readability_score, completeness: r.scores.completeness_score } })
+    } catch (e) { setReadmeTab({ status: 'error', result: '', error: e instanceof Error ? e.message : 'Failed', scores: null }) }
+  }
+
+  async function runInsights() {
+    setInsightsTab({ status: 'loading', result: '', error: '' })
+    try {
+      const r = await generateInsights(aiPayload)
+      setInsightsTab({ status: 'done', result: r.insights, error: '' })
+    } catch (e) { setInsightsTab({ status: 'error', result: '', error: e instanceof Error ? e.message : 'Failed' }) }
+  }
+
+  async function handleAsk() {
     if (!question.trim()) return
     const q = question.trim()
+    const history: AskMessage[] = chat.slice(-12)
     setQuestion('')
-    setChat((prev) => [...prev, { role: 'user', content: q }])
+    setChat((p) => [...p, { role: 'user', content: q }])
     setAskLoading(true)
     try {
-      const response = await askRepository({
-        repo_name: repo.full_name,
-        clone_url: repo.clone_url,
-        scan_id: preferredScanId,
-        scan_result: preferredScanId ? undefined : (scanResult ?? undefined),
-        question: q,
-      })
-      setChat((prev) => [...prev, { role: 'assistant', content: response.answer }])
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Ask repo failed'
-      setChat((prev) => [...prev, { role: 'assistant', content: message }])
-    } finally {
-      setAskLoading(false)
-    }
+      const r = await askRepository({ ...aiPayload, question: q, history })
+      setChat((p) => [...p, { role: 'assistant', content: r.answer }])
+    } catch (e) {
+      setChat((p) => [...p, { role: 'assistant', content: e instanceof Error ? e.message : 'Ask failed' }])
+    } finally { setAskLoading(false) }
   }
+
+  function AITabBody({ tab, onRun, children }: { tab: AITabState; onRun: () => void; children?: ReactNode }) {
+    const needsScan = scanState !== 'done' && !scanResult
+    return (
+      <div style={dStyles.readout}>
+        {needsScan ? (
+          <div style={{ ...dStyles.readoutRow, color: 'var(--fg-4)', padding: '20px 14px', justifyContent: 'center' }}>
+            Run a scan first to enable this analysis.
+          </div>
+        ) : tab.status === 'idle' ? (
+          <div style={{ padding: '20px 14px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+            <div style={{ color: 'var(--fg-4)', fontSize: 12.5 }}>Ready to generate.</div>
+            <button style={dStyles.primaryBtn} onClick={onRun}><IconBolt size={12} /> Generate</button>
+          </div>
+        ) : tab.status === 'loading' ? (
+          <div style={{ ...dStyles.readoutRow, justifyContent: 'center', gap: 10, padding: '20px 14px' }}>
+            <span style={hsStyles.miniSpinner} /><span style={{ color: 'var(--fg-3)', fontSize: 12.5 }}>Analysing…</span>
+          </div>
+        ) : tab.status === 'error' ? (
+          <div style={{ ...dStyles.readoutRow, color: 'var(--warn)', padding: '16px 14px', flexDirection: 'column', gap: 10 }}>
+            <span>{tab.error}</span>
+            <button style={dStyles.ghostBtn} onClick={onRun}>Retry</button>
+          </div>
+        ) : children}
+      </div>
+    )
+  }
+
+  const readoutEntries = scanResult ? [
+    { key: 'Frontend', val: scanResult.frontend_framework || 'Unknown', source: scanResult.data_sources.frameworks },
+    { key: 'Backend', val: scanResult.backend_framework || 'Unknown', source: scanResult.data_sources.frameworks },
+    { key: 'Languages', val: scanResult.languages.join(', ') || 'Unknown', source: scanResult.data_sources.languages },
+    { key: 'Dependencies', val: `${scanResult.dependencies.length} detected`, source: scanResult.data_sources.dependencies },
+    { key: 'Tests', val: scanResult.quality.has_tests ? `${scanResult.quality.test_file_count ?? 0} test files` : 'No tests detected', source: scanResult.data_sources.quality },
+    { key: 'Build', val: scanResult.quality.build_files?.join(', ') || 'No build config detected', source: scanResult.data_sources.quality },
+    { key: 'README', val: scanResult.readme_analysis.exists ? `${scanResult.readme_analysis.score ?? 0}/100` : 'Missing', source: scanResult.data_sources.documentation },
+    { key: 'API routes', val: `${scanResult.api_routes.length} detected`, source: scanResult.data_sources.api_routes },
+    { key: 'Security', val: scanResult.security.finding_count ? `${scanResult.security.finding_count} finding(s)` : 'No patterns detected', source: scanResult.data_sources.security },
+    { key: 'Git history', val: `${scanResult.commit_history.analyzed_commits ?? 0} commits analyzed`, source: scanResult.data_sources.commit_history },
+  ] : []
 
   return (
     <div style={dStyles.flyoutBackdrop} onClick={onClose}>
       <div style={dStyles.flyout} onClick={(e) => e.stopPropagation()}>
+
+        {/* Header */}
         <div style={dStyles.flyoutHeader}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <button style={dStyles.iconBtn} onClick={onClose}><IconChevLeft size={15} /></button>
             <div style={dStyles.repoNameLine}>
               <span style={dStyles.repoOwner}>{owner}<span style={{ color: 'var(--fg-4)' }}>/</span></span>
               <span style={{ ...dStyles.repoName, fontSize: 17 }}>{name}</span>
-              <span style={dStyles.visBadge}>
-                {repo.private ? <><IconLock size={10} /> private</> : <>public</>}
-              </span>
+              <span style={dStyles.visBadge}>{repo.private ? <><IconLock size={10} /> private</> : <>public</>}</span>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <a href={repo.html_url} target="_blank" rel="noreferrer" style={{ ...dStyles.ghostBtn, textDecoration: 'none' }}>
               View on GitHub <IconArrowUpRight size={12} />
             </a>
-            <button
-              style={{ ...dStyles.primaryBtn, opacity: scanState === 'scanning' ? 0.6 : 1 }}
-              onClick={onAnalyze}
-              disabled={scanState === 'scanning'}
-            >
-              <IconBolt size={12} />
-              {scanState === 'scanning' ? 'Analyzing…' : 'Run analysis'}
+            <button style={{ ...dStyles.primaryBtn, opacity: scanState === 'scanning' ? 0.6 : 1 }} onClick={onAnalyze} disabled={scanState === 'scanning'}>
+              <IconBolt size={12} />{scanState === 'scanning' ? 'Analyzing…' : 'Run analysis'}
             </button>
           </div>
         </div>
 
-        <div style={dStyles.flyoutBody}>
+        {/* Stats grid — always visible */}
+        <div style={{ padding: '14px 22px 0', flexShrink: 0 }}>
           <div style={dStyles.statsGrid}>
             <Stat label="STARS" value={repo.stargazers_count.toLocaleString()} icon={<IconStar size={12} />} />
             <Stat label="FORKS" value={repo.forks_count} icon={<IconFork size={12} />} />
@@ -1095,193 +1367,155 @@ function RepoFlyout({
             <Stat label="SIZE" value={repo.size ? `${(repo.size / 1024).toFixed(1)} MB` : '—'} icon={<IconBook size={12} />} />
             <Stat label="BRANCH" value={repo.default_branch ?? 'main'} icon={<IconGit size={12} />} mono />
           </div>
+        </div>
 
-          <Section title="DESCRIPTION">
-            <p style={dStyles.descText}>{repo.description ?? 'No description provided.'}</p>
-            {(repo.topics ?? []).length > 0 && (
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
-                {(repo.topics ?? []).map(t => <span key={t} style={dStyles.topicTag}>{t}</span>)}
-              </div>
-            )}
-          </Section>
+        {/* Tab bar */}
+        <div style={dStyles.flyoutTabBar}>
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              style={{ ...dStyles.flyoutTab, ...(activeTab === t.id ? dStyles.flyoutTabActive : {}) }}
+              onClick={() => setActiveTab(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
 
-          {repo.language && (
-            <Section title="LANGUAGE COMPOSITION">
-              <div style={dStyles.langBar}>
-                <span style={{ background: langColor, width: '72%', display: 'block' }} />
-                <span style={{ background: '#3a3a44', width: '18%', display: 'block' }} />
-                <span style={{ background: '#2a2a32', width: '10%', display: 'block' }} />
-              </div>
-              <div style={dStyles.langLegend}>
-                <span>
-                  <span style={{ ...dStyles.legendDot, background: langColor }} />
-                  {repo.language} 72%
-                </span>
-                <span>
-                  <span style={{ ...dStyles.legendDot, background: '#3a3a44' }} />
-                  Other 28%
-                </span>
+        {/* Tab body */}
+        <div style={dStyles.flyoutBody}>
+
+          {activeTab === 'overview' && (
+            <>
+              <Section title="DESCRIPTION">
+                <p style={dStyles.descText}>{repo.description ?? 'No description provided.'}</p>
+                {(repo.topics ?? []).length > 0 && (
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
+                    {(repo.topics ?? []).map(t => <span key={t} style={dStyles.topicTag}>{t}</span>)}
+                  </div>
+                )}
+              </Section>
+              {(repo.language || Object.keys(languages).length > 0) && (
+                <Section title="LANGUAGE COMPOSITION">
+                  {(() => {
+                    const entries = Object.entries(languages)
+                    const total = entries.reduce((s, [, b]) => s + b, 0)
+                    const top = entries.sort(([, a], [, b]) => b - a).slice(0, 5)
+                    const otherBytes = total - top.reduce((s, [, b]) => s + b, 0)
+                    const bars = total > 0
+                      ? [...top.map(([lang, bytes]) => ({ lang, pct: (bytes / total) * 100 })), ...(otherBytes > 0 ? [{ lang: 'Other', pct: (otherBytes / total) * 100 }] : [])]
+                      : repo.language ? [{ lang: repo.language, pct: 100 }] : []
+                    return (
+                      <>
+                        <div style={dStyles.langBar}>{bars.map(({ lang, pct }) => <span key={lang} style={{ background: LANG_COLOR[lang] ?? '#3a3a44', width: `${pct}%`, display: 'block' }} />)}</div>
+                        <div style={dStyles.langLegend}>{bars.map(({ lang, pct }) => <span key={lang}><span style={{ ...dStyles.legendDot, background: LANG_COLOR[lang] ?? '#3a3a44' }} />{lang} {pct.toFixed(1)}%</span>)}</div>
+                      </>
+                    )
+                  })()}
+                </Section>
+              )}
+              <Section title="COMMIT ACTIVITY · 16 WEEKS">
+                <div style={dStyles.actChart}>
+                  {activity.map((v, i) => { const peak = Math.max(...activity, 1); return <div key={i} style={{ ...dStyles.actBar, height: `${Math.max(4, (v / peak) * 100)}%`, background: i === activity.length - 1 ? 'var(--accent)' : 'var(--line-2)' }} /> })}
+                </div>
+              </Section>
+            </>
+          )}
+
+          {activeTab === 'scan' && (
+            <Section title="repoX READOUT" hint={scanState === 'scanning' ? 'Scanning…' : scanState === 'done' ? 'Scan complete' : scanState === 'error' ? scanError : 'Click "Run analysis" to scan'}>
+              <div style={dStyles.readout}>
+                {scanState === 'scanning' && <div style={{ padding: '10px 14px', color: 'var(--accent)', textTransform: 'uppercase', fontSize: 10, letterSpacing: 1.2 }}>Stage: {scanStage}</div>}
+                {scanState === 'idle' && <div style={{ ...dStyles.readoutRow, color: 'var(--fg-4)', justifyContent: 'center', padding: '20px 14px' }}>Run an analysis to see scan results.</div>}
+                {scanState === 'scanning' && <div style={{ ...dStyles.readoutRow, justifyContent: 'center', gap: 10, padding: '20px 14px' }}><span style={hsStyles.miniSpinner} /><span style={{ color: 'var(--fg-3)', fontSize: 12.5, fontFamily: "'JetBrains Mono', monospace" }}>Cloning and analyzing repository…</span></div>}
+                {scanState === 'error' && <div style={{ ...dStyles.readoutRow, color: 'var(--warn)', padding: '16px 14px' }}>{scanError}</div>}
+                {scanState === 'done' && readoutEntries.map(({ key, val, source }) => (
+                  <div key={key} style={{ ...dStyles.readoutRow, alignItems: 'flex-start' }}><span style={dStyles.readoutKey}>{key}</span><span style={{ ...dStyles.readoutVal, textAlign: 'right' }}>{val}<small style={{ display: 'block', color: 'var(--fg-4)', marginTop: 4, fontSize: 9 }}>SOURCE · {source}</small></span></div>
+                ))}
               </div>
             </Section>
           )}
 
-          <Section title="COMMIT ACTIVITY · 16 WEEKS">
-            <div style={dStyles.actChart}>
-              {activity.map((v, i) => (
-                <div
-                  key={i}
-                  style={{
-                    ...dStyles.actBar,
-                    height: `${Math.max(4, (v / Math.max(...activity)) * 100)}%`,
-                    background: i === activity.length - 1 ? 'var(--accent)' : 'var(--line-2)',
-                  }}
-                />
-              ))}
-            </div>
-          </Section>
-
-          <Section title="repoX READOUT" hint={hintMap[scanState]}>
-            <div style={dStyles.readout}>
-              {scanState === 'idle' && (
-                <div style={{ ...dStyles.readoutRow, color: 'var(--fg-4)', justifyContent: 'center', padding: '20px 14px' }}>
-                  Run an analysis to see architecture insights.
+          {activeTab === 'summary' && (
+            <Section title="AI SUMMARY">
+              <AITabBody tab={summaryTab} onRun={() => void runSummary()}>
+                <div style={{ ...dStyles.readoutRow, whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>
+                  <MarkdownBlock text={summaryTab.result} />
                 </div>
-              )}
-              {scanState === 'scanning' && (
-                <div style={{ ...dStyles.readoutRow, justifyContent: 'center', gap: 10, padding: '20px 14px' }}>
-                  <span style={hsStyles.miniSpinner} />
-                  <span style={{ color: 'var(--fg-3)', fontSize: 12.5, fontFamily: "'JetBrains Mono', monospace" }}>
-                    Cloning and analyzing repository…
-                  </span>
+              </AITabBody>
+            </Section>
+          )}
+
+          {activeTab === 'architecture' && (
+            <Section title="ARCHITECTURE OVERVIEW">
+              <AITabBody tab={archTab} onRun={() => void runArch()}>
+                <div style={{ ...dStyles.readoutRow, whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>
+                  <MarkdownBlock text={archTab.result} />
                 </div>
-              )}
-              {scanState === 'error' && (
-                <div style={{ ...dStyles.readoutRow, color: 'var(--warn)', padding: '16px 14px' }}>
-                  {scanError}
+              </AITabBody>
+            </Section>
+          )}
+
+          {activeTab === 'readme' && (
+            <Section title="README ANALYSIS">
+              <AITabBody tab={readmeTab} onRun={() => void runReadme()}>
+                <>
+                  {readmeTab.scores && (
+                    <div style={{ ...dStyles.readoutRow, display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 8 }}>
+                      {[['README', readmeTab.scores.readme], ['READABILITY', readmeTab.scores.readability], ['COMPLETENESS', readmeTab.scores.completeness]].map(([label, val]) => (
+                        <div key={label} style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px', background: 'var(--bg-1)' }}>
+                          <div style={{ color: 'var(--fg-4)', fontSize: 11 }}>{label}</div>
+                          <div style={{ color: 'var(--fg)', fontSize: 16, fontWeight: 600 }}>{val}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ ...dStyles.readoutRow, whiteSpace: 'pre-wrap', lineHeight: 1.55 }}><MarkdownBlock text={readmeTab.result} /></div>
+                </>
+              </AITabBody>
+            </Section>
+          )}
+
+          {activeTab === 'insights' && (
+            <Section title="REPOSITORY INSIGHTS">
+              <AITabBody tab={insightsTab} onRun={() => void runInsights()}>
+                <div style={{ ...dStyles.readoutRow, whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>
+                  <MarkdownBlock text={insightsTab.result} />
                 </div>
-              )}
-              {scanState === 'done' && readoutEntries.map(({ key, val }) => (
-                <div key={key} style={dStyles.readoutRow}>
-                  <span style={dStyles.readoutKey}>{key}</span>
-                  <span style={dStyles.readoutVal}>{val}</span>
+              </AITabBody>
+            </Section>
+          )}
+
+          {activeTab === 'ask' && (
+            <Section title="ASK REPO">
+              <div style={{ border: '1px solid var(--line)', borderRadius: 10, overflow: 'hidden', background: 'var(--bg-1)' }}>
+                <div style={{ maxHeight: 320, overflowY: 'auto', padding: 10, display: 'grid', gap: 8 }}>
+                  {chat.length === 0 && <div style={{ color: 'var(--fg-4)', fontSize: 12.5, fontFamily: "'JetBrains Mono', monospace" }}>Ask anything: authentication flow, framework choices, API structure…</div>}
+                  {chat.map((m, idx) => (
+                    <div key={idx} style={{ fontSize: 12.5, lineHeight: 1.5, whiteSpace: 'pre-wrap', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--line)', background: m.role === 'user' ? 'var(--bg-2)' : '#0c0f14', color: m.role === 'user' ? 'var(--fg-2)' : 'var(--fg)' }}>
+                      {cleanAskText(m.content)}
+                    </div>
+                  ))}
+                  {askLoading && <div style={{ color: 'var(--fg-4)', fontSize: 12.5, fontFamily: "'JetBrains Mono', monospace" }}>Thinking…</div>}
                 </div>
-              ))}
-            </div>
-          </Section>
-
-          <Section title="AI SUMMARY">
-            <div style={dStyles.readout}>
-              <div style={{ ...dStyles.readoutRow, whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>
-                {aiLoading ? 'Generating summary...' : <MarkdownBlock text={summary || 'Run analysis to generate AI summary.'} />}
-              </div>
-            </div>
-          </Section>
-
-          <Section title="ARCHITECTURE OVERVIEW">
-            <div style={dStyles.readout}>
-              <div style={{ ...dStyles.readoutRow, whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>
-                {aiLoading ? 'Analyzing architecture...' : <MarkdownBlock text={architecture || 'Architecture overview will appear here.'} />}
-              </div>
-            </div>
-          </Section>
-
-          <Section title="README ANALYSIS">
-            <div style={dStyles.readout}>
-              {readmeScores && (
-                <div style={{ ...dStyles.readoutRow, display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 8 }}>
-                  <div style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px', background: 'var(--bg-1)' }}>
-                    <div style={{ color: 'var(--fg-4)', fontSize: 11 }}>README</div>
-                    <div style={{ color: 'var(--fg)', fontSize: 16, fontWeight: 600 }}>{readmeScores.readme}</div>
-                  </div>
-                  <div style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px', background: 'var(--bg-1)' }}>
-                    <div style={{ color: 'var(--fg-4)', fontSize: 11 }}>READABILITY</div>
-                    <div style={{ color: 'var(--fg)', fontSize: 16, fontWeight: 600 }}>{readmeScores.readability}</div>
-                  </div>
-                  <div style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px', background: 'var(--bg-1)' }}>
-                    <div style={{ color: 'var(--fg-4)', fontSize: 11 }}>COMPLETENESS</div>
-                    <div style={{ color: 'var(--fg)', fontSize: 16, fontWeight: 600 }}>{readmeScores.completeness}</div>
-                  </div>
+                <div style={{ display: 'flex', gap: 8, padding: 10, borderTop: '1px solid var(--line)' }}>
+                  <input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void handleAsk() }} placeholder="Ask about this repository…" style={{ flex: 1, background: 'var(--bg)', border: '1px solid var(--line)', color: 'var(--fg)', borderRadius: 8, padding: '8px 10px', fontSize: 12.5 }} />
+                  <button style={{ ...dStyles.primaryBtn, opacity: askLoading ? 0.6 : 1 }} onClick={() => void handleAsk()} disabled={askLoading}>{askLoading ? 'Asking…' : 'Ask'}</button>
                 </div>
-              )}
-              <div style={{ ...dStyles.readoutRow, whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>
-                {aiLoading ? 'Reviewing README...' : <MarkdownBlock text={readmeAnalysis || 'README quality analysis will appear here.'} />}
               </div>
-            </div>
-          </Section>
+            </Section>
+          )}
 
-          <Section title="REPOSITORY INSIGHTS">
-            <div style={dStyles.readout}>
-              <div style={{ ...dStyles.readoutRow, whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>
-                {aiLoading ? 'Generating insights...' : <MarkdownBlock text={insights || 'Repository strengths and risks will appear here.'} />}
-              </div>
-              {aiError && <div style={{ ...dStyles.readoutRow, color: 'var(--warn)' }}>{aiError}</div>}
-            </div>
-          </Section>
+          {activeTab === 'viz' && (
+            <Section title="VISUALIZATION ENGINE">
+              <Suspense fallback={<div style={{ color: 'var(--fg-4)', fontSize: 12 }}>Loading…</div>}>
+                <VisualizationPanel repoName={repo.full_name} cloneUrl={repo.clone_url} scanResult={scanResult} />
+              </Suspense>
+            </Section>
+          )}
 
-          <Section title="ASK REPO">
-            <div style={{ border: '1px solid var(--line)', borderRadius: 10, overflow: 'hidden', background: 'var(--bg-1)' }}>
-              <div style={{ maxHeight: 260, overflowY: 'auto', padding: 10, display: 'grid', gap: 8 }}>
-                {chat.length === 0 && (
-                  <div style={{ color: 'var(--fg-4)', fontSize: 12.5, fontFamily: "'JetBrains Mono', monospace" }}>
-                    Ask: How authentication works? What backend framework is used? How APIs are structured?
-                  </div>
-                )}
-                {chat.map((m, idx) => (
-                  <div
-                    key={idx}
-                    style={{
-                      fontSize: 12.5,
-                      lineHeight: 1.5,
-                      whiteSpace: 'pre-wrap',
-                      padding: '8px 10px',
-                      borderRadius: 8,
-                      border: '1px solid var(--line)',
-                      background: m.role === 'user' ? 'var(--bg-2)' : '#0c0f14',
-                      color: m.role === 'user' ? 'var(--fg-2)' : 'var(--fg)',
-                    }}
-                  >
-                    <MarkdownBlock text={m.content} />
-                  </div>
-                ))}
-                {askLoading && (
-                  <div style={{ color: 'var(--fg-4)', fontSize: 12.5, fontFamily: "'JetBrains Mono', monospace" }}>
-                    Thinking...
-                  </div>
-                )}
-              </div>
-              <div style={{ display: 'flex', gap: 8, padding: 10, borderTop: '1px solid var(--line)' }}>
-                <input
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void handleAskRepo()
-                  }}
-                  placeholder="Ask about this repository..."
-                  style={{
-                    flex: 1,
-                    background: 'var(--bg)',
-                    border: '1px solid var(--line)',
-                    color: 'var(--fg)',
-                    borderRadius: 8,
-                    padding: '8px 10px',
-                    fontSize: 12.5,
-                  }}
-                />
-                <button style={{ ...dStyles.primaryBtn, opacity: askLoading ? 0.6 : 1 }} onClick={() => void handleAskRepo()} disabled={askLoading}>
-                  {askLoading ? 'Asking...' : 'Ask'}
-                </button>
-              </div>
-            </div>
-          </Section>
-
-          <Section title="VISUALIZATION ENGINE">
-            <Suspense fallback={<div style={{ color: 'var(--fg-4)', fontSize: 12 }}>Loading visualization engine...</div>}>
-              <VisualizationPanel repoName={repo.full_name} cloneUrl={repo.clone_url} scanResult={scanResult} />
-            </Suspense>
-          </Section>
         </div>
       </div>
-
       <style>{`
         @keyframes flyIn { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
         @keyframes hsSpin { to { transform: rotate(360deg); } }
@@ -1304,12 +1538,17 @@ function Dashboard({
   onResync: () => void
 }) {
   const [filter, setFilter] = useState<'all' | 'public' | 'private' | 'sources'>('all')
-  const [activeNav, setActiveNav] = useState<'repos' | 'scans' | 'settings'>('repos')
+  const [activeNav, setActiveNav] = useState<'repos' | 'overview' | 'activity' | 'scans' | 'integrations' | 'tokens' | 'settings'>('repos')
   const [storageMode, setStorageMode] = useState<'session' | 'local'>(() => {
     const stored = localStorage.getItem('repox_storage_mode')
     return stored === 'local' ? 'local' : 'session'
   })
   const [deleteOnClose, setDeleteOnClose] = useState<boolean>(() => localStorage.getItem('repox_delete_on_close') === '1')
+  const [devMode, setDevMode] = useState<boolean>(() => localStorage.getItem('repox_dev_mode') === '1')
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(() => localStorage.getItem('repox_show_diag') === '1')
+  const [verboseErrors, setVerboseErrors] = useState<boolean>(() => localStorage.getItem('repox_verbose_errors') === '1')
+  const [autoRefreshScans, setAutoRefreshScans] = useState<boolean>(() => localStorage.getItem('repox_auto_refresh_scans') === '1')
+  const [experimentalViz, setExperimentalViz] = useState<boolean>(() => localStorage.getItem('repox_exp_viz') === '0' ? false : true)
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState<Repo | null>(null)
   const [scanState, setScanState] = useState<ScanState>('idle')
@@ -1322,6 +1561,12 @@ function Dashboard({
   const [scanDiff, setScanDiff] = useState<ScannerDiffResponse | null>(null)
   const [aiSnapshotByRepo, setAiSnapshotByRepo] = useState<Record<string, string>>({})
   const [scanRunByRepo, setScanRunByRepo] = useState<Record<string, 'idle' | 'running' | 'done' | 'error'>>({})
+  const [settingsTab, setSettingsTab] = useState<'general' | 'storage' | 'developer' | 'security' | 'integrations' | 'ai-provider'>('general')
+  const [aiKeyDraft, setAiKeyDraft] = useState(() => localStorage.getItem('repox_ai_key') ?? '')
+  const [aiModelDraft, setAiModelDraft] = useState(() => localStorage.getItem('repox_ai_model') ?? '')
+  const [aiProviderDraft, setAiProviderDraft] = useState(() => localStorage.getItem('repox_ai_provider') ?? 'openrouter')
+  const [aiKeySaved, setAiKeySaved] = useState(false)
+  const [aiKeyVisible, setAiKeyVisible] = useState(false)
 
   useEffect(() => {
     setScanState('idle')
@@ -1369,6 +1614,11 @@ function Dashboard({
   useEffect(() => {
     localStorage.setItem('repox_delete_on_close', deleteOnClose ? '1' : '0')
   }, [deleteOnClose])
+  useEffect(() => localStorage.setItem('repox_dev_mode', devMode ? '1' : '0'), [devMode])
+  useEffect(() => localStorage.setItem('repox_show_diag', showDiagnostics ? '1' : '0'), [showDiagnostics])
+  useEffect(() => localStorage.setItem('repox_verbose_errors', verboseErrors ? '1' : '0'), [verboseErrors])
+  useEffect(() => localStorage.setItem('repox_auto_refresh_scans', autoRefreshScans ? '1' : '0'), [autoRefreshScans])
+  useEffect(() => localStorage.setItem('repox_exp_viz', experimentalViz ? '1' : '0'), [experimentalViz])
 
   useEffect(() => {
     const onBeforeUnload = () => {
@@ -1384,6 +1634,9 @@ function Dashboard({
     private: repos.filter(r => r.private).length,
     sources: repos.filter(r => r.forks_count > 0).length,
   }
+  const uniqueScannedRepos = new Set(scanHistory.map((s) => s.repo_name)).size
+  const latestScanAt = scanHistory[0]?.created_at ?? null
+  const lastEvents = scanHistory.slice(0, 12)
 
   const filtered = repos.filter(r => {
     if (filter === 'public' && r.private) return false
@@ -1421,6 +1674,20 @@ function Dashboard({
     void loadHistory()
   }, [storageMode])
 
+  useEffect(() => {
+    if (!autoRefreshScans || activeNav !== 'scans') return
+    const timer = window.setInterval(async () => {
+      if (storageMode === 'local') return
+      try {
+        const history = await fetchScannerHistory(50)
+        setScanHistory(history.items)
+      } catch {
+        // no-op
+      }
+    }, 20000)
+    return () => window.clearInterval(timer)
+  }, [autoRefreshScans, activeNav, storageMode])
+
   async function handleAnalyze() {
     if (!selected || scanState === 'scanning') return
     setScanState('scanning')
@@ -1450,7 +1717,7 @@ function Dashboard({
         setScanHistory(history.items)
       }
     } catch (err) {
-      setScanError(err instanceof Error ? err.message : 'Scan failed')
+      setScanError(err instanceof Error ? err.message : (verboseErrors ? 'Scan failed: unknown error' : 'Scan failed'))
       setScanState('error')
     }
   }
@@ -1483,7 +1750,10 @@ function Dashboard({
       setTimeout(() => {
         setScanRunByRepo((prev) => ({ ...prev, [repo.full_name]: 'idle' }))
       }, 1200)
-    } catch {
+    } catch (err) {
+      if (verboseErrors) {
+        setScanError(err instanceof Error ? err.message : 'Scan run failed')
+      }
       setScanRunByRepo((prev) => ({ ...prev, [repo.full_name]: 'error' }))
     }
   }
@@ -1495,7 +1765,9 @@ function Dashboard({
         scanCount={scanCount}
         activeNav={activeNav}
         onNavigate={(id) => {
-          if (id === 'repos' || id === 'scans' || id === 'settings') setActiveNav(id)
+          if (id === 'repos' || id === 'overview' || id === 'activity' || id === 'scans' || id === 'integrations' || id === 'tokens' || id === 'settings') {
+            setActiveNav(id)
+          }
         }}
         handle={handle}
         avatar={avatar}
@@ -1508,44 +1780,165 @@ function Dashboard({
         <div style={dStyles.page}>
           <div style={dStyles.pageHead}>
             <div>
-              <h1 style={dStyles.pageTitle}>{activeNav === 'repos' ? 'Repositories' : activeNav === 'scans' ? 'Scans' : 'Settings'}</h1>
+              <h1 style={dStyles.pageTitle}>
+                {activeNav === 'repos' ? 'Repositories'
+                  : activeNav === 'overview' ? 'Overview'
+                    : activeNav === 'activity' ? 'Activity'
+                      : activeNav === 'scans' ? 'Scans'
+                        : activeNav === 'integrations' ? 'Integrations'
+                          : activeNav === 'tokens' ? 'Tokens'
+                            : 'Settings'}
+              </h1>
               <div style={dStyles.pageSub}>
-                <span><IconDot color="var(--accent)" size={6} /> {activeNav === 'repos' ? `Synced just now · ${repos.length} repositories` : activeNav === 'scans' ? `Completed scans · ${scanCount}` : 'Configure storage behavior for live usage'}</span>
+                <span><IconDot color="var(--accent)" size={6} /> {
+                  activeNav === 'repos' ? `Synced just now · ${repos.length} repositories`
+                    : activeNav === 'overview' ? `Workspace health · ${scanCount} total scans`
+                      : activeNav === 'activity' ? 'Recent repository intelligence activity'
+                        : activeNav === 'scans' ? `Completed scans · ${scanCount}`
+                          : activeNav === 'integrations' ? 'Connected platforms and provider status'
+                            : activeNav === 'tokens' ? 'Session and token runtime diagnostics'
+                              : 'Configure storage behavior for live usage'
+                }</span>
               </div>
             </div>
             <div style={dStyles.pageActions}>
-              <button style={dStyles.ghostBtn} onClick={onResync}><IconBolt size={13} /> Re-sync</button>
-              <button style={dStyles.primaryBtn}><IconPlus size={13} /> Import repository</button>
+              {activeNav === 'repos' && (
+                <>
+                  <button style={dStyles.ghostBtn} onClick={onResync}><IconBolt size={13} /> Re-sync</button>
+                  <button style={dStyles.primaryBtn}><IconPlus size={13} /> Import repository</button>
+                </>
+              )}
+              {activeNav === 'scans' && (
+                <button style={dStyles.ghostBtn} onClick={onResync}><IconBolt size={13} /> Refresh scans</button>
+              )}
+              {activeNav === 'activity' && (
+                <button style={dStyles.ghostBtn} onClick={onResync}><IconBolt size={13} /> Refresh activity</button>
+              )}
+              {activeNav === 'tokens' && (
+                <button style={dStyles.ghostBtn} onClick={onLogout}><IconLogout size={13} /> Revoke session</button>
+              )}
+              {activeNav === 'settings' && (
+                <button
+                  style={dStyles.ghostBtn}
+                  onClick={() => {
+                    localStorage.removeItem('repox_storage_mode')
+                    localStorage.removeItem('repox_delete_on_close')
+                    localStorage.removeItem('repox_dev_mode')
+                    localStorage.removeItem('repox_show_diag')
+                    localStorage.removeItem('repox_verbose_errors')
+                    localStorage.removeItem('repox_auto_refresh_scans')
+                    localStorage.removeItem('repox_exp_viz')
+                    setStorageMode('session')
+                    setDeleteOnClose(false)
+                    setDevMode(false)
+                    setShowDiagnostics(false)
+                    setVerboseErrors(false)
+                    setAutoRefreshScans(false)
+                    setExperimentalViz(true)
+                  }}
+                >
+                  Reset settings
+                </button>
+              )}
             </div>
           </div>
 
-          <div style={dStyles.toolbar}>
-            <div style={dStyles.chipRow}>
-              <Chip active={filter === 'all'} onClick={() => setFilter('all')} count={counts.all}>All</Chip>
-              <Chip active={filter === 'public'} onClick={() => setFilter('public')} count={counts.public}>Public</Chip>
-              <Chip active={filter === 'private'} onClick={() => setFilter('private')} count={counts.private}>Private</Chip>
-              <Chip active={filter === 'sources'} onClick={() => setFilter('sources')} count={counts.sources}>Sources</Chip>
-            </div>
-            <div style={dStyles.toolRight}>
-              <div style={dStyles.localSearch}>
-                <IconSearch size={13} style={{ color: 'var(--fg-4)' }} />
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Filter list…"
-                  style={dStyles.localSearchInput}
-                />
+          {(activeNav === 'repos' || activeNav === 'scans') && (
+            <div style={dStyles.toolbar}>
+              <div style={dStyles.chipRow}>
+                <Chip active={filter === 'all'} onClick={() => setFilter('all')} count={counts.all}>All</Chip>
+                <Chip active={filter === 'public'} onClick={() => setFilter('public')} count={counts.public}>Public</Chip>
+                <Chip active={filter === 'private'} onClick={() => setFilter('private')} count={counts.private}>Private</Chip>
+                <Chip active={filter === 'sources'} onClick={() => setFilter('sources')} count={counts.sources}>Sources</Chip>
               </div>
-              <button style={dStyles.sortBtn}>
-                <span style={{ color: 'var(--fg-4)', fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>SORT</span>
-                <span>Last updated</span>
-                <IconChevDown size={11} />
-              </button>
+              <div style={dStyles.toolRight}>
+                <div style={dStyles.localSearch}>
+                  <IconSearch size={13} style={{ color: 'var(--fg-4)' }} />
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Filter list…"
+                    style={dStyles.localSearchInput}
+                  />
+                </div>
+                <button style={dStyles.sortBtn}>
+                  <span style={{ color: 'var(--fg-4)', fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>SORT</span>
+                  <span>Last updated</span>
+                  <IconChevDown size={11} />
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           <div style={dStyles.repoList}>
-            {activeNav === 'repos' ? (
+            {activeNav === 'overview' ? (
+              <div style={{ width: '100%', display: 'grid', gap: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
+                  <Stat label="Repositories" value={repos.length} icon={<IconRepo size={14} />} />
+                  <Stat label="Total Scans" value={scanCount} icon={<IconShield size={14} />} />
+                  <Stat label="Scanned Repos" value={uniqueScannedRepos} icon={<IconGraph size={14} />} />
+                  <Stat label="Last Scan" value={latestScanAt ? new Date(latestScanAt).toLocaleString() : '—'} icon={<IconClock size={14} />} mono />
+                </div>
+                <div style={{ border: '1px solid var(--line)', borderRadius: 10, background: 'var(--bg-1)', padding: 12 }}>
+                  <div style={{ color: 'var(--fg-4)', fontSize: 11, marginBottom: 8, fontFamily: "'JetBrains Mono', monospace" }}>TOP REPOSITORIES BY SCAN ACTIVITY</div>
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    {Array.from(new Set(scanHistory.map((s) => s.repo_name))).slice(0, 8).map((repo) => {
+                      const count = scanHistory.filter((s) => s.repo_name === repo).length
+                      return (
+                        <div key={repo} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 2px', borderTop: '1px solid var(--line-soft)' }}>
+                          <span style={{ color: 'var(--fg)', flex: 1 }}>{repo}</span>
+                          <span style={{ color: 'var(--fg-3)', fontSize: 12 }}>{count} scans</span>
+                        </div>
+                      )
+                    })}
+                    {scanHistory.length === 0 && <span style={{ color: 'var(--fg-4)', fontSize: 12 }}>No scan data yet. Run a scan to populate overview.</span>}
+                  </div>
+                </div>
+              </div>
+            ) : activeNav === 'activity' ? (
+              <div style={{ width: '100%', border: '1px solid var(--line)', borderRadius: 10, overflow: 'hidden' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr', gap: 8, padding: '10px 12px', borderBottom: '1px solid var(--line)', color: 'var(--fg-4)', fontSize: 11 }}>
+                  <span>Repository</span>
+                  <span>Event</span>
+                  <span>Status</span>
+                  <span>Time</span>
+                </div>
+                {lastEvents.map((item) => (
+                  <div key={item.scan_id} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr', gap: 8, padding: '10px 12px', borderTop: '1px solid var(--line-soft)', fontSize: 12.5 }}>
+                    <span style={{ color: 'var(--fg)' }}>{item.repo_name}</span>
+                    <span style={{ color: 'var(--fg-3)' }}>scan completed</span>
+                    <span style={{ color: item.status === 'completed' ? 'var(--accent)' : 'var(--warn)' }}>{item.status}</span>
+                    <span style={{ color: 'var(--fg-4)' }}>{new Date(item.created_at).toLocaleString()}</span>
+                  </div>
+                ))}
+                {lastEvents.length === 0 && (
+                  <div style={{ padding: 20, color: 'var(--fg-4)', fontSize: 12 }}>No activity yet.</div>
+                )}
+              </div>
+            ) : activeNav === 'integrations' ? (
+              <div style={{ width: '100%', maxWidth: 780, display: 'grid', gap: 12 }}>
+                <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 12, background: 'var(--bg-1)' }}>
+                  <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 6 }}>GitHub</div>
+                  <div style={{ color: 'var(--fg-3)', fontSize: 12.5 }}>Status: {repos.length > 0 ? 'Connected' : 'Not connected'}</div>
+                </div>
+                <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 12, background: 'var(--bg-1)' }}>
+                  <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 6 }}>AI Provider</div>
+                  <div style={{ color: 'var(--fg-3)', fontSize: 12.5 }}>Configured from backend environment (OpenRouter/OpenAI-compatible).</div>
+                </div>
+              </div>
+            ) : activeNav === 'tokens' ? (
+              <div style={{ width: '100%', maxWidth: 780, display: 'grid', gap: 12 }}>
+                <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 12, background: 'var(--bg-1)' }}>
+                  <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 8 }}>Session Diagnostics</div>
+                  <div style={{ display: 'grid', gap: 6, fontSize: 12.5 }}>
+                    <span style={{ color: 'var(--fg-3)' }}>Auth status: {repos.length > 0 ? 'Authenticated' : 'Unknown/Expired'}</span>
+                    <span style={{ color: 'var(--fg-3)' }}>Storage mode: {storageMode}</span>
+                    <span style={{ color: 'var(--fg-3)' }}>Delete on close: {deleteOnClose ? 'Enabled' : 'Disabled'}</span>
+                    <span style={{ color: 'var(--fg-3)' }}>Client diagnostics: {showDiagnostics ? 'Enabled' : 'Disabled'}</span>
+                  </div>
+                </div>
+              </div>
+            ) : activeNav === 'repos' ? (
               filtered.length === 0 ? (
                 <div style={dStyles.empty}>
                   <div style={dStyles.emptyIcon}><IconSearch size={20} /></div>
@@ -1694,43 +2087,249 @@ function Dashboard({
               </div>
             ) : (
               <div style={dStyles.empty}>
-                <div style={{ width: '100%', maxWidth: 680, display: 'grid', gap: 14 }}>
-                  <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 14, background: 'var(--bg-1)' }}>
-                    <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 10 }}>Storage mode</div>
-                    <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ width: '100%', maxWidth: 960, display: 'grid', gridTemplateColumns: '280px 1fr', gap: 16, alignItems: 'start' }}>
+                  <div style={{ border: '1px solid var(--line)', borderRadius: 10, background: 'var(--bg-1)', padding: 10 }}>
+                    <div style={{ color: 'var(--fg-4)', fontSize: 11, margin: '6px 8px', fontFamily: "'JetBrains Mono', monospace" }}>GENERAL</div>
+                    {[
+                      ['general', 'General'],
+                      ['storage', 'Storage'],
+                      ['developer', 'Developer options'],
+                    ].map(([id, label]) => (
                       <button
-                        style={{ ...dStyles.ghostBtn, borderColor: storageMode === 'session' ? 'var(--accent-dim)' : 'var(--line)' }}
-                        onClick={() => setStorageMode('session')}
+                        key={id}
+                        style={{
+                          width: '100%',
+                          textAlign: 'left',
+                          padding: '9px 10px',
+                          borderRadius: 8,
+                          border: '1px solid transparent',
+                          background: settingsTab === id ? 'rgba(255,255,255,0.06)' : 'transparent',
+                          color: settingsTab === id ? 'var(--fg)' : 'var(--fg-2)',
+                          fontSize: 13,
+                          cursor: 'pointer',
+                        }}
+                        onClick={() => setSettingsTab(id as 'general' | 'storage' | 'developer')}
                       >
-                        Session Memory
+                        {label}
                       </button>
-                      <button
-                        style={{ ...dStyles.ghostBtn, borderColor: storageMode === 'local' ? 'var(--accent-dim)' : 'var(--line)' }}
-                        onClick={() => setStorageMode('local')}
-                      >
-                        Browser Local Storage
-                      </button>
-                    </div>
-                    <div style={{ color: 'var(--fg-4)', fontSize: 12, marginTop: 8 }}>
-                      Local mode keeps scan history in browser for live deployments without backend storage.
-                    </div>
+                    ))}
+                    <div style={{ borderTop: '1px solid var(--line)', margin: '10px 0' }} />
+                    <div style={{ color: 'var(--fg-4)', fontSize: 11, margin: '6px 8px', fontFamily: "'JetBrains Mono', monospace" }}>AI CONFIGURATION</div>
+                    <button style={{ width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 8, border: '1px solid transparent', background: settingsTab === 'ai-provider' ? 'rgba(255,255,255,0.06)' : 'transparent', color: settingsTab === 'ai-provider' ? 'var(--fg)' : 'var(--fg-2)', fontSize: 13, cursor: 'pointer' }} onClick={() => setSettingsTab('ai-provider')}>
+                      AI Provider
+                    </button>
+                    <div style={{ borderTop: '1px solid var(--line)', margin: '10px 0' }} />
+                    <div style={{ color: 'var(--fg-4)', fontSize: 11, margin: '6px 8px', fontFamily: "'JetBrains Mono', monospace" }}>SECURITY AND QUALITY</div>
+                    <button style={{ width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 8, border: '1px solid transparent', background: settingsTab === 'security' ? 'rgba(255,255,255,0.06)' : 'transparent', color: settingsTab === 'security' ? 'var(--fg)' : 'var(--fg-2)', fontSize: 13, cursor: 'pointer' }} onClick={() => setSettingsTab('security')}>
+                      Security
+                    </button>
+                    <div style={{ borderTop: '1px solid var(--line)', margin: '10px 0' }} />
+                    <div style={{ color: 'var(--fg-4)', fontSize: 11, margin: '6px 8px', fontFamily: "'JetBrains Mono', monospace" }}>INTEGRATIONS</div>
+                    <button style={{ width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 8, border: '1px solid transparent', background: settingsTab === 'integrations' ? 'rgba(255,255,255,0.06)' : 'transparent', color: settingsTab === 'integrations' ? 'var(--fg)' : 'var(--fg-2)', fontSize: 13, cursor: 'pointer' }} onClick={() => setSettingsTab('integrations')}>
+                      Integrations
+                    </button>
                   </div>
 
-                  <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 14, background: 'var(--bg-1)' }}>
-                    <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 10 }}>Retention</div>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--fg-2)', fontSize: 12.5 }}>
-                      <input type="checkbox" checked={deleteOnClose} onChange={(e) => setDeleteOnClose(e.target.checked)} />
-                      Delete local scan data when page/tab closes
-                    </label>
-                    <button
-                      style={{ ...dStyles.ghostBtn, marginTop: 10 }}
-                      onClick={() => {
-                        localStorage.removeItem('repox_scan_history')
-                        setScanHistory([])
-                      }}
-                    >
-                      Clear local scan data now
-                    </button>
+                  <div style={{ display: 'grid', gap: 14 }}>
+                    {(settingsTab === 'general' || settingsTab === 'storage') && (
+                      <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 14, background: 'var(--bg-1)' }}>
+                        <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 10 }}>Storage mode</div>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button
+                            style={{ ...dStyles.ghostBtn, borderColor: storageMode === 'session' ? 'var(--accent-dim)' : 'var(--line)' }}
+                            onClick={() => setStorageMode('session')}
+                          >
+                            Session Memory
+                          </button>
+                          <button
+                            style={{ ...dStyles.ghostBtn, borderColor: storageMode === 'local' ? 'var(--accent-dim)' : 'var(--line)' }}
+                            onClick={() => setStorageMode('local')}
+                          >
+                            Browser Local Storage
+                          </button>
+                        </div>
+                        <div style={{ color: 'var(--fg-4)', fontSize: 12, marginTop: 8 }}>
+                          Local mode keeps scan history in browser for live deployments without backend storage.
+                        </div>
+                      </div>
+                    )}
+
+                    {(settingsTab === 'general' || settingsTab === 'storage') && (
+                      <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 14, background: 'var(--bg-1)' }}>
+                        <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 10 }}>Retention</div>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                          <input type="checkbox" checked={deleteOnClose} onChange={(e) => setDeleteOnClose(e.target.checked)} />
+                          Delete local scan data when page/tab closes
+                        </label>
+                        <button
+                          style={{ ...dStyles.ghostBtn, marginTop: 10 }}
+                          onClick={() => {
+                            localStorage.removeItem('repox_scan_history')
+                            setScanHistory([])
+                          }}
+                        >
+                          Clear local scan data now
+                        </button>
+                      </div>
+                    )}
+
+                    {settingsTab === 'developer' && (
+                      <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 14, background: 'var(--bg-1)' }}>
+                        <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 10 }}>Developer options</div>
+                        <div style={{ display: 'grid', gap: 8 }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                            <input type="checkbox" checked={devMode} onChange={(e) => setDevMode(e.target.checked)} />
+                            Enable developer mode
+                          </label>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                            <input type="checkbox" checked={showDiagnostics} onChange={(e) => setShowDiagnostics(e.target.checked)} />
+                            Show diagnostics in footer
+                          </label>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                            <input type="checkbox" checked={verboseErrors} onChange={(e) => setVerboseErrors(e.target.checked)} />
+                            Verbose API errors
+                          </label>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                            <input type="checkbox" checked={autoRefreshScans} onChange={(e) => setAutoRefreshScans(e.target.checked)} />
+                            Auto refresh scan history (20s)
+                          </label>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                            <input type="checkbox" checked={experimentalViz} onChange={(e) => setExperimentalViz(e.target.checked)} />
+                            Experimental visualization features
+                          </label>
+                        </div>
+                        <button
+                          style={{ ...dStyles.ghostBtn, marginTop: 12 }}
+                          onClick={() => {
+                            setStorageMode('session')
+                            setDeleteOnClose(false)
+                            setDevMode(false)
+                            setShowDiagnostics(false)
+                            setVerboseErrors(false)
+                            setAutoRefreshScans(false)
+                            setExperimentalViz(true)
+                            localStorage.removeItem('repox_storage_mode')
+                            localStorage.removeItem('repox_delete_on_close')
+                            localStorage.removeItem('repox_dev_mode')
+                            localStorage.removeItem('repox_show_diag')
+                            localStorage.removeItem('repox_verbose_errors')
+                            localStorage.removeItem('repox_auto_refresh_scans')
+                            localStorage.removeItem('repox_exp_viz')
+                          }}
+                        >
+                          Reset settings to default
+                        </button>
+                      </div>
+                    )}
+
+                    {settingsTab === 'ai-provider' && (
+                      <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 14, background: 'var(--bg-1)', display: 'grid', gap: 14 }}>
+                        <div>
+                          <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 4 }}>AI Provider</div>
+                          <div style={{ color: 'var(--fg-4)', fontSize: 12 }}>
+                            Supply your own API key to use AI features. Keys are stored only in your browser's localStorage and never sent to our servers — they go directly to the provider.
+                          </div>
+                        </div>
+                        {localStorage.getItem('repox_ai_key') && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: 7, background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.25)', fontSize: 12, color: '#4ade80' }}>
+                            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#4ade80', display: 'inline-block' }} />
+                            Custom key active — AI features will use your key
+                          </div>
+                        )}
+                        <div style={{ display: 'grid', gap: 10 }}>
+                          <div>
+                            <div style={{ color: 'var(--fg-2)', fontSize: 12, marginBottom: 5 }}>Provider</div>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                              {(['openrouter', 'groq'] as const).map(p => (
+                                <button
+                                  key={p}
+                                  style={{ ...dStyles.ghostBtn, borderColor: aiProviderDraft === p ? 'var(--accent-dim)' : 'var(--line)', color: aiProviderDraft === p ? 'var(--fg)' : 'var(--fg-2)', textTransform: 'capitalize' }}
+                                  onClick={() => setAiProviderDraft(p)}
+                                >
+                                  {p === 'openrouter' ? 'OpenRouter' : 'Groq'}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{ color: 'var(--fg-2)', fontSize: 12, marginBottom: 5 }}>API Key</div>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <input
+                                type={aiKeyVisible ? 'text' : 'password'}
+                                value={aiKeyDraft}
+                                onChange={e => { setAiKeyDraft(e.target.value); setAiKeySaved(false) }}
+                                placeholder={aiProviderDraft === 'groq' ? 'gsk_…' : 'sk-or-…'}
+                                style={{ flex: 1, background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 7, padding: '7px 10px', color: 'var(--fg)', fontSize: 12.5, fontFamily: "'JetBrains Mono', monospace", outline: 'none' }}
+                              />
+                              <button
+                                style={{ ...dStyles.ghostBtn, padding: '6px 10px', fontSize: 11 }}
+                                onClick={() => setAiKeyVisible(v => !v)}
+                              >
+                                {aiKeyVisible ? 'Hide' : 'Show'}
+                              </button>
+                            </div>
+                          </div>
+                          <div>
+                            <div style={{ color: 'var(--fg-2)', fontSize: 12, marginBottom: 5 }}>Model <span style={{ color: 'var(--fg-4)' }}>(optional — leave blank for default)</span></div>
+                            <input
+                              type="text"
+                              value={aiModelDraft}
+                              onChange={e => { setAiModelDraft(e.target.value); setAiKeySaved(false) }}
+                              placeholder={aiProviderDraft === 'groq' ? 'llama-3.3-70b-versatile' : 'google/gemini-flash-1.5'}
+                              style={{ width: '100%', boxSizing: 'border-box', background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 7, padding: '7px 10px', color: 'var(--fg)', fontSize: 12.5, fontFamily: "'JetBrains Mono', monospace", outline: 'none' }}
+                            />
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <button
+                            style={{ ...dStyles.ghostBtn, background: 'rgba(99,102,241,0.12)', borderColor: 'rgba(99,102,241,0.4)', color: '#a5b4fc' }}
+                            onClick={() => {
+                              if (aiKeyDraft) localStorage.setItem('repox_ai_key', aiKeyDraft)
+                              else localStorage.removeItem('repox_ai_key')
+                              if (aiModelDraft) localStorage.setItem('repox_ai_model', aiModelDraft)
+                              else localStorage.removeItem('repox_ai_model')
+                              localStorage.setItem('repox_ai_provider', aiProviderDraft)
+                              setAiKeySaved(true)
+                            }}
+                          >
+                            Save
+                          </button>
+                          <button
+                            style={{ ...dStyles.ghostBtn }}
+                            onClick={() => {
+                              localStorage.removeItem('repox_ai_key')
+                              localStorage.removeItem('repox_ai_model')
+                              localStorage.removeItem('repox_ai_provider')
+                              setAiKeyDraft('')
+                              setAiModelDraft('')
+                              setAiProviderDraft('openrouter')
+                              setAiKeySaved(false)
+                            }}
+                          >
+                            Clear
+                          </button>
+                          {aiKeySaved && <span style={{ color: '#4ade80', fontSize: 12 }}>Saved</span>}
+                        </div>
+                      </div>
+                    )}
+
+                    {settingsTab === 'security' && (
+                      <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 14, background: 'var(--bg-1)' }}>
+                        <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 6 }}>Security</div>
+                        <div style={{ color: 'var(--fg-3)', fontSize: 12.5 }}>
+                          Use repository-level `SECURITY.md`, CI security checks, and Dependabot for vulnerability hygiene.
+                        </div>
+                      </div>
+                    )}
+
+                    {settingsTab === 'integrations' && (
+                      <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 14, background: 'var(--bg-1)' }}>
+                        <div style={{ color: 'var(--fg)', fontSize: 13, marginBottom: 6 }}>Integrations</div>
+                        <div style={{ color: 'var(--fg-3)', fontSize: 12.5 }}>
+                          GitHub OAuth is active. More integrations can be added from this section in future phases.
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1740,6 +2339,12 @@ function Dashboard({
           <div style={dStyles.footnote}>
             <span><IconShield size={11} /> Read-only access · token in memory only</span>
             <span style={{ flex: 1 }} />
+            {showDiagnostics && (
+              <span style={{ color: 'var(--fg-4)' }}>
+                mode={storageMode} | dev={devMode ? 'on' : 'off'} | scans={scanHistory.length}
+              </span>
+            )}
+            {showDiagnostics && <span style={{ margin: '0 8px', color: 'var(--fg-4)' }}>|</span>}
             <span>GET /github/repos · 200 OK</span>
           </div>
         </div>

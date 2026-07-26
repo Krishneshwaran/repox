@@ -18,6 +18,12 @@ class ScanResult(BaseModel):
     structure: dict[str, bool]
     important_files: list[str]
     dependencies: list[str]
+    readme_analysis: dict[str, object] = Field(default_factory=dict)
+    quality: dict[str, object] = Field(default_factory=dict)
+    security: dict[str, object] = Field(default_factory=dict)
+    api_routes: list[dict[str, str]] = Field(default_factory=list)
+    commit_history: dict[str, object] = Field(default_factory=dict)
+    data_sources: dict[str, str] = Field(default_factory=dict)
 
 
 class ScannerRunResponse(BaseModel):

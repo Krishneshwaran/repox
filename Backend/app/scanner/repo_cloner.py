@@ -12,10 +12,9 @@ class RepoCloner:
 
     def clone(self, clone_url: str) -> Path:
         target_dir = self.base_dir / uuid4().hex
-        Repo.clone_from(clone_url, target_dir, depth=1)
+        Repo.clone_from(clone_url, target_dir, depth=100, single_branch=True)
         return target_dir
 
     def cleanup(self, repo_dir: Path) -> None:
         if repo_dir.exists():
             shutil.rmtree(repo_dir, ignore_errors=True)
-

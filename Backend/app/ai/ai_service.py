@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from threading import Lock
 
@@ -14,7 +15,7 @@ from app.ai.prompt_builder import ask_prompt
 from app.ai.readme_analyzer import ReadmeAnalyzer
 from app.ai.repo_summarizer import RepoSummarizer
 from app.config import get_settings
-from app.models.ai import ReadmeScores
+from app.models.ai import AskMessage, ReadmeScores
 from app.models.scanner import ScanResult
 from app.scanner.repo_cloner import RepoCloner
 from app.scanner.service_registry import scanner_service
@@ -62,7 +63,7 @@ class AIService:
                     "model": model,
                     "messages": messages,
                     "temperature": 0.2,
-                    "max_tokens": 1024,
+                    "max_tokens": 512,
                 },
             )
             if not response.is_success:
@@ -79,15 +80,27 @@ class AIService:
             payload = response.json()
             return payload["choices"][0]["message"]["content"].strip()
 
-    def _complete(self, messages: list[dict[str, str]]) -> str:
+    def _complete(self, messages: list[dict[str, str]], *, user_api_key: str | None = None, user_model: str | None = None, user_provider: str | None = None) -> str:
         last_error: Exception | None = None
+
+        # User-supplied key takes priority
+        if user_api_key:
+            base_url = (
+                "https://api.groq.com/openai/v1" if user_provider == "groq"
+                else "https://openrouter.ai/api/v1"
+            )
+            model = user_model or (self.settings.groq_model if user_provider == "groq" else self.settings.openrouter_model)
+            try:
+                return self._provider_request(base_url, user_api_key, model, messages)
+            except Exception as exc:
+                last_error = exc
 
         if self.settings.groq_api_key:
             try:
                 return self._provider_request(
                     "https://api.groq.com/openai/v1",
                     self.settings.groq_api_key,
-                    self.settings.groq_model,
+                    user_model or self.settings.groq_model,
                     messages,
                 )
             except Exception as exc:
@@ -98,7 +111,7 @@ class AIService:
                 return self._provider_request(
                     "https://openrouter.ai/api/v1",
                     self.settings.openrouter_api_key,
-                    self.settings.openrouter_model,
+                    user_model or self.settings.openrouter_model,
                     messages,
                 )
             except Exception as exc:
@@ -114,6 +127,12 @@ class AIService:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="No AI provider configured. Set GROQ_API_KEY or OPENROUTER_API_KEY.",
         )
+
+    def _bound_complete(self, user_api_key: str | None, user_model: str | None, user_provider: str | None):
+        """Returns a no-arg-override complete callable bound to user credentials."""
+        def complete(messages: list[dict[str, str]]) -> str:
+            return self._complete(messages, user_api_key=user_api_key, user_model=user_model, user_provider=user_provider)
+        return complete
 
     def _get_scan(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> ScanResult:
         if scan_result:
@@ -134,90 +153,105 @@ class AIService:
                 return p.read_text(encoding="utf-8", errors="ignore"), True
         return "", False
 
-    def summarize(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> str:
+    def summarize(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None, user_api_key: str | None = None, user_model: str | None = None, user_provider: str | None = None) -> str:
         scan = self._get_scan(repo_name, scan_id, scan_result, clone_url)
         key = self._cache_key("summary", repo_name)
         cached = self.cache.get(key)
         if isinstance(cached, str):
             return cached
-
+        complete = self._bound_complete(user_api_key, user_model, user_provider)
         context = self.context_builder.build(scan)
-        summary = self.summarizer.summarize(context, self._complete)
+        summary = self.summarizer.summarize(context, complete)
         self.cache.set(key, summary)
         return summary
 
-    def architecture(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> str:
+    def architecture(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None, user_api_key: str | None = None, user_model: str | None = None, user_provider: str | None = None) -> str:
         scan = self._get_scan(repo_name, scan_id, scan_result, clone_url)
         key = self._cache_key("architecture", repo_name)
         cached = self.cache.get(key)
         if isinstance(cached, str):
             return cached
-
+        complete = self._bound_complete(user_api_key, user_model, user_provider)
         context = self.context_builder.build(scan)
-        report = self.arch_analyzer.analyze(context, self._complete)
+        report = self.arch_analyzer.analyze(context, complete)
         self.cache.set(key, report)
         return report
 
-    def readme_analysis(self, repo_name: str, clone_url: str | None, scan_result: ScanResult | None = None) -> tuple[str, ReadmeScores]:
+    def readme_analysis(self, repo_name: str, clone_url: str | None, scan_result: ScanResult | None = None, user_api_key: str | None = None, user_model: str | None = None, user_provider: str | None = None) -> tuple[str, ReadmeScores]:
         key = self._cache_key("readme", repo_name)
         cached = self.cache.get(key)
         if isinstance(cached, tuple):
             return cached  # type: ignore[return-value]
-
+        complete = self._bound_complete(user_api_key, user_model, user_provider)
         repo_dir: Path | None = None
         try:
             repo_dir = self._clone_repo(repo_name, clone_url)
             content, exists = self._read_readme(repo_dir)
-            analysis, (readme_score, readability_score, completeness_score) = self.readme_analyzer.analyze(content, exists, self._complete)
-            scores = ReadmeScores(
-                readme_score=readme_score,
-                readability_score=readability_score,
-                completeness_score=completeness_score,
-            )
+            analysis, (readme_score, readability_score, completeness_score) = self.readme_analyzer.analyze(content, exists, complete)
+            scores = ReadmeScores(readme_score=readme_score, readability_score=readability_score, completeness_score=completeness_score)
             result = (analysis, scores)
             self.cache.set(key, result)
             return result
         except Exception as exc:
             if isinstance(exc, HTTPException):
                 raise
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to analyze README: {exc}",
-            ) from exc
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Failed to analyze README: {exc}") from exc
         finally:
             if repo_dir:
                 self.cloner.cleanup(repo_dir)
 
-    def insights(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> str:
+    def insights(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None, user_api_key: str | None = None, user_model: str | None = None, user_provider: str | None = None) -> str:
         scan = self._get_scan(repo_name, scan_id, scan_result, clone_url)
         key = self._cache_key("insights", repo_name)
         cached = self.cache.get(key)
         if isinstance(cached, str):
             return cached
-
+        complete = self._bound_complete(user_api_key, user_model, user_provider)
         repo_dir: Path | None = None
         try:
             repo_dir = self._clone_repo(repo_name, clone_url)
             notes = self.context_builder.memory_notes(scan, repo_dir)
             self.embeddings.upsert_notes(repo_name, notes)
             context = self.context_builder.build(scan, repo_dir)
-            report = self.insight_generator.generate(context, self._complete)
+            report = self.insight_generator.generate(context, complete)
             self.cache.set(key, report)
             return report
         finally:
             if repo_dir:
                 self.cloner.cleanup(repo_dir)
 
-    def ask(self, repo_name: str, question: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> str:
+    def ask(
+        self,
+        repo_name: str,
+        question: str,
+        scan_id: str | None,
+        scan_result: ScanResult | None,
+        clone_url: str | None,
+        history: list[AskMessage] | None = None,
+        user_api_key: str | None = None,
+        user_model: str | None = None,
+        user_provider: str | None = None,
+    ) -> str:
         scan = self._get_scan(repo_name, scan_id, scan_result, clone_url)
-        key = self._cache_key("ask", repo_name, question.strip().lower())
+        history_key = ""
+        history_lines: list[str] = []
+        if history:
+            for message in history[-12:]:
+                role = message.role.strip() or "unknown"
+                content = message.content.strip()
+                if content:
+                    history_lines.append(f"{role}: {content}")
+            history_key = hashlib.sha256("\n".join(history_lines).encode("utf-8")).hexdigest()[:16]
+        key = self._cache_key("ask", repo_name, f"{question.strip().lower()}:{history_key}")
         cached = self.cache.get(key)
         if isinstance(cached, str):
             return cached
 
+        complete = self._bound_complete(user_api_key, user_model, user_provider)
         context = self.context_builder.build(scan)
         memory = self.embeddings.query_notes(repo_name, question)
-        answer = self._complete(ask_prompt(context, question, memory))
+        history_text = "\n".join(history_lines) if history else ""
+        answer = complete(ask_prompt(context, question, memory, history_text))
         self.cache.set(key, answer)
         return answer
 

@@ -3,16 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Lock
 
+from fastapi import HTTPException, status
+
+from app.ai.ai_service import AIService
 from app.models.scanner import ScanResult
 from app.models.visualization import GraphResponse, TimelineEvent, TimelineResponse, VizEdge, VizNode
+from app.scanner.repo_cloner import RepoCloner
 from app.scanner.service_registry import scanner_service
-from app.visualization.api_flow_mapper import ApiFlowMapper
-from app.visualization.architecture_mapper import ArchitectureMapper
-from app.visualization.dependency_mapper import DependencyMapper
-from app.visualization.diagram_generator import DiagramGenerator
-from app.visualization.graph_builder import GraphBuilder
-from app.visualization.node_generator import NodeGenerator
-from app.visualization.timeline_analyzer import TimelineAnalyzer
+from app.visualization import viz_ai
 
 
 class VisualizationCache:
@@ -30,20 +28,21 @@ class VisualizationCache:
 
 
 class VisualizationService:
-    def __init__(self, _workspace: Path) -> None:
+    def __init__(self, workspace: Path) -> None:
         self.cache = VisualizationCache()
-        self.node_generator = NodeGenerator()
-        self.graph_builder = GraphBuilder()
-        self.dependency_mapper = DependencyMapper()
-        self.architecture_mapper = ArchitectureMapper()
-        self.api_flow_mapper = ApiFlowMapper()
-        self.timeline_analyzer = TimelineAnalyzer()
-        self.diagram_generator = DiagramGenerator()
+        self._ai = AIService(workspace)
+        self.cloner = RepoCloner(workspace / ".viz_repo_cache")
 
     def _key(self, op: str, repo: str) -> str:
-        return f"viz:{op}:{repo}"
+        return f"viz:v2:{op}:{repo}"
 
-    def _resolve_scan(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> ScanResult:
+    def _resolve_scan(
+        self,
+        repo_name: str,
+        scan_id: str | None,
+        scan_result: ScanResult | None,
+        clone_url: str | None,
+    ) -> ScanResult:
         if scan_result:
             return scan_result
         if scan_id:
@@ -51,83 +50,82 @@ class VisualizationService:
         _, scan = scanner_service.scan(repo_name, clone_url)
         return scan
 
-    def _to_graph(self, nodes: list[dict[str, object]], edges: list[dict[str, str]], insights: list[str], mermaid: str) -> GraphResponse:
+    def _clone(self, repo_name: str, clone_url: str | None) -> Path:
+        effective_url = clone_url or f"https://github.com/{repo_name}.git"
+        return self.cloner.clone(effective_url)
+
+    def _to_graph(self, nodes: list[dict], edges: list[dict], insights: list[str]) -> GraphResponse:
         return GraphResponse(
             nodes=[VizNode(**n) for n in nodes],
             edges=[VizEdge(**e) for e in edges],
-            mermaid=mermaid,
+            mermaid="",
             insights=insights,
         )
 
-    def architecture(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> GraphResponse:
-        key = self._key("architecture", repo_name)
+    def _run_viz(self, op: str, repo_name: str, clone_url: str | None, generate_fn) -> GraphResponse:
+        key = self._key(op, repo_name)
         cached = self.cache.get(key)
         if isinstance(cached, GraphResponse):
             return cached
 
-        scan = self._resolve_scan(repo_name, scan_id, scan_result, clone_url)
-        nodes = self.node_generator.core_nodes(scan)
-        edges = self.graph_builder.build_architecture_edges(scan)
-        mermaid = self.diagram_generator.architecture_mermaid(scan.repo_name, scan.frontend_framework, scan.backend_framework, scan.docker, scan.github_actions)
-        insights = [
-            "Interactive architecture model built from scanner intelligence.",
-            "Heaviest coupling likely between API and backend service layers.",
-            "Use node inspection to identify module ownership and dependency surface.",
-        ]
-        graph = self._to_graph(nodes, edges, insights, mermaid)
-        self.cache.set(key, graph)
-        return graph
+        repo_dir: Path | None = None
+        try:
+            repo_dir = self._clone(repo_name, clone_url)
+            nodes, edges, insights = generate_fn(repo_dir, repo_name, self._ai._complete)
+            graph = self._to_graph(nodes, edges, insights)
+            self.cache.set(key, graph)
+            return graph
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Visualization failed: {exc}",
+            ) from exc
+        finally:
+            if repo_dir:
+                self.cloner.cleanup(repo_dir)
 
-    def dependencies(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> GraphResponse:
-        key = self._key("dependencies", repo_name)
-        cached = self.cache.get(key)
-        if isinstance(cached, GraphResponse):
-            return cached
-
-        scan = self._resolve_scan(repo_name, scan_id, scan_result, clone_url)
-        nodes, edges, insights = self.dependency_mapper.map_dependencies(scan)
-        mermaid = self.graph_builder.mermaid_from_graph(nodes, edges)
-        graph = self._to_graph(nodes, edges, insights, mermaid)
-        self.cache.set(key, graph)
-        return graph
-
-    def api_flow(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> GraphResponse:
-        key = self._key("api-flow", repo_name)
-        cached = self.cache.get(key)
-        if isinstance(cached, GraphResponse):
-            return cached
-
-        scan = self._resolve_scan(repo_name, scan_id, scan_result, clone_url)
-        nodes, edges, insights = self.api_flow_mapper.map_flow(scan)
-        mermaid = self.graph_builder.mermaid_from_graph(nodes, edges)
-        graph = self._to_graph(nodes, edges, insights, mermaid)
-        self.cache.set(key, graph)
-        return graph
-
-    def repository_map(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> GraphResponse:
-        key = self._key("repository-map", repo_name)
-        cached = self.cache.get(key)
-        if isinstance(cached, GraphResponse):
-            return cached
-
-        scan = self._resolve_scan(repo_name, scan_id, scan_result, clone_url)
-        nodes, edges, insights = self.architecture_mapper.repository_map(scan)
-        mermaid = self.graph_builder.mermaid_from_graph(nodes, edges)
-        graph = self._to_graph(nodes, edges, insights, mermaid)
-        self.cache.set(key, graph)
-        return graph
-
-    def timeline(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> TimelineResponse:
+    def _run_timeline(self, repo_name: str, clone_url: str | None) -> TimelineResponse:
         key = self._key("timeline", repo_name)
         cached = self.cache.get(key)
         if isinstance(cached, TimelineResponse):
             return cached
 
-        scan = self._resolve_scan(repo_name, scan_id, scan_result, clone_url)
-        events_raw, summary = self.timeline_analyzer.build_timeline(scan)
-        timeline = TimelineResponse(events=[TimelineEvent(**e) for e in events_raw], summary=summary)
-        self.cache.set(key, timeline)
-        return timeline
+        repo_dir: Path | None = None
+        try:
+            repo_dir = self._clone(repo_name, clone_url)
+            events_raw, summary = viz_ai.timeline(repo_dir, repo_name, self._ai._complete)
+            result = TimelineResponse(events=[TimelineEvent(**e) for e in events_raw], summary=summary)
+            self.cache.set(key, result)
+            return result
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Timeline failed: {exc}",
+            ) from exc
+        finally:
+            if repo_dir:
+                self.cloner.cleanup(repo_dir)
+
+    # ── Public API ────────────────────────────────────────────
+
+    def architecture(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> GraphResponse:
+        return self._run_viz("architecture", repo_name, clone_url, viz_ai.architecture_graph)
+
+    def dependencies(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> GraphResponse:
+        return self._run_viz("dependencies", repo_name, clone_url, viz_ai.dependency_graph)
+
+    def api_flow(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> GraphResponse:
+        return self._run_viz("api-flow", repo_name, clone_url, viz_ai.api_flow_graph)
+
+    def repository_map(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> GraphResponse:
+        return self._run_viz("repository-map", repo_name, clone_url, viz_ai.repository_map)
+
+    def timeline(self, repo_name: str, scan_id: str | None, scan_result: ScanResult | None, clone_url: str | None) -> TimelineResponse:
+        return self._run_timeline(repo_name, clone_url)
 
 
 visualization_service = VisualizationService(Path.cwd())
